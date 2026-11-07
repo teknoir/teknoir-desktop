@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+#
+# teknoir-desktop host session (host mode).
+#
+# Started by teknoir-desktop.service. Runs the device's own desktop
+# environment inside an Xvnc server whose only listener is a unix socket in
+# /run/teknoir-desktop/, where the teknoir-desktop pod picks it up through a
+# hostPath volume. Nothing is exposed on TCP.
+#
+# The socket is mode 0660 and belongs to TEKNOIR_DESKTOP_GROUP (default
+# teknoir-desktop, gid 64080 on every Teknoir device), so the pod can connect
+# only if its supplementalGroups include that gid. The unit runs with that
+# group as its primary group, so the socket is created with it; the chgrp
+# below only matters for a drop-in that names another group.
+#
+# The X display has its own MIT-MAGIC-COOKIE as well, so a client that can
+# reach the X socket still cannot read the screen or type into the session
+# without the cookie. The VNC socket above is the only way in for the pod.
+# The host needs the `xauth` package (the cookie) and `dbus-x11` (the
+# `dbus-launch` the session runs under), Debian/Ubuntu package names.
+#
+# Installed to /usr/local/libexec/teknoir-desktop-session by an Ansible role;
+# this file documents it, it is not installed by the image.
+#
+# Exit status 78 (EX_CONFIG) means a package is missing (a desktop session,
+# TigerVNC, xauth or dbus-x11): systemd's RestartPreventExitStatus=78 then
+# leaves the unit failed until it is installed and `systemctl restart
+# teknoir-desktop` is run, instead of restarting every 5 s.
+set -euo pipefail
+
+PROG=teknoir-desktop-session
+RUNDIR="${RUNTIME_DIRECTORY:-/run/teknoir-desktop}"
+SOCKET="${RUNDIR}/vnc.sock"
+DISPLAY_NUM=":7"
+GEOMETRY="${TEKNOIR_DESKTOP_GEOMETRY:-1600x900}"
+GROUP="${TEKNOIR_DESKTOP_GROUP:-teknoir-desktop}"
+
+log() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+mkdir -p "$RUNDIR"
+
+# The session to run, in order of preference. gnome-session is asked for the
+# flashback/metacity session because plain GNOME needs a full graphics stack.
+session_cmd=()
+for candidate in \
+  "startxfce4" \
+  "startlxqt" \
+  "mate-session" \
+  "gnome-session --session=gnome-flashback-metacity"; do
+  read -r -a argv <<<"$candidate"
+  if command -v "${argv[0]}" >/dev/null 2>&1; then
+    session_cmd=("${argv[@]}")
+    break
+  fi
+done
+
+if [ ${#session_cmd[@]} -eq 0 ]; then
+  log "no desktop session found; install xfce4 (or lxqt, mate-desktop, gnome-session)"
+  exit 78 # EX_CONFIG: not restartable, see RestartPreventExitStatus
+fi
+log "using desktop session: ${session_cmd[*]}"
+
+# Prefer Xtigervnc (the Debian/Ubuntu name; there /usr/bin/Xvnc is an
+# update-alternatives link that TightVNC or RealVNC may own). Fall back to
+# Xvnc (Fedora/RHEL ship TigerVNC under that name), but accept a binary only
+# if it reports itself as TigerVNC and lists -rfbunixpath: other servers lack
+# that option.
+#
+# The probe reads -help, not -version: TigerVNC 1.15 (Debian 13, trixie)
+# prints nothing for -version and exits 0, while -help prints the
+# "Xvnc TigerVNC <ver>" banner on 1.12 through 1.15 together with the
+# parameter list. `|| true` keeps an older binary that exits non-zero on -help
+# from failing the script. Both orders are matched, so the banner's position
+# in the output does not matter.
+xvnc=""
+for candidate in Xtigervnc Xvnc; do
+  command -v "$candidate" >/dev/null 2>&1 || continue
+  usage=$("$candidate" -help 2>&1 </dev/null || true)
+  case $usage in
+    *TigerVNC*rfbunixpath* | *rfbunixpath*TigerVNC*)
+      xvnc="$candidate"
+      break
+      ;;
+    *)
+      log "ignoring ${candidate}: not a TigerVNC server"
+      ;;
+  esac
+done
+if [ -z "$xvnc" ]; then
+  log "no TigerVNC server found (Xtigervnc or Xvnc); install tigervnc-standalone-server"
+  exit 78 # EX_CONFIG: not restartable, see RestartPreventExitStatus
+fi
+
+# The cookie needs xauth and the session runs under dbus-launch (dbus-x11).
+# Without them the script would fail later with 127, which systemd's
+# Restart=always would retry every 5 s forever; exit 78 instead so the unit
+# stays failed with a message naming the package.
+for tool in xauth:xauth dbus-launch:dbus-x11; do
+  if ! command -v "${tool%%:*}" >/dev/null 2>&1; then
+    log "${tool%%:*} not found; install ${tool#*:}"
+    exit 78 # EX_CONFIG: not restartable, see RestartPreventExitStatus
+  fi
+done
+
+pids=()
+
+start_child() {
+  "$@" &
+  pids+=("$!")
+}
+
+# A child that has exited but not been reaped still answers kill -0, so ask
+# /proc whether it is a zombie instead of trusting the signal.
+is_running() {
+  local pid=$1 stat
+  [ -r "/proc/${pid}/stat" ] || return 1
+  read -r stat <"/proc/${pid}/stat" 2>/dev/null || return 1
+  stat=${stat##*') '}
+  [ "${stat%% *}" != Z ]
+}
+
+# TERM everything, wait up to five seconds, then KILL what is left and reap.
+stop_children() {
+  local pid remaining deadline
+  for pid in "${pids[@]}"; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  deadline=$((SECONDS + 5))
+  while ((SECONDS < deadline)); do
+    remaining=0
+    for pid in "${pids[@]}"; do
+      if is_running "$pid"; then
+        remaining=1
+      fi
+    done
+    if ((remaining == 0)); then
+      break
+    fi
+    sleep 0.2
+  done
+  for pid in "${pids[@]}"; do
+    if is_running "$pid"; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+  wait 2>/dev/null || true
+  return 0
+}
+
+# shellcheck disable=SC2317 # run from the TERM/INT trap
+on_term() {
+  log "received a termination signal, stopping children"
+  stop_children
+  exit 0
+}
+trap on_term TERM INT
+
+# The display's cookie. Not in RUNDIR: the pod can read RUNDIR through gid
+# 64080. systemd sets HOME for User=.
+XAUTH="${HOME:?}/.teknoir-desktop.Xauthority"
+cookie="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+(umask 077 && rm -f "$XAUTH" && : >"$XAUTH" && xauth -q -f "$XAUTH" add "$DISPLAY_NUM" MIT-MAGIC-COOKIE-1 "$cookie")
+
+n="${DISPLAY_NUM#:}"
+rm -f "$SOCKET" "/tmp/.X${n}-lock" "/tmp/.X11-unix/X${n}"
+
+# The X server bind-mounts its own socket here; /tmp may have been cleaned.
+mkdir -p /tmp/.X11-unix 2>/dev/null || true
+
+# -BlacklistTimeout 0: every client of this unix socket has the same peer
+# address (the socket path), so TigerVNC's per-address blacklist would lock
+# out every client, noVNC included, after about five connections that fail to
+# authenticate (the pod's readiness probe used to be one of them).
+# -Log: the pod's readiness probe connects every 10 s and completes the
+# handshake; TigerVNC logs several lines per connection (Connections,
+# SConnection, VNCSConnST). Only errors still reach the journal.
+log "starting ${xvnc} on display ${DISPLAY_NUM} (${GEOMETRY}) at ${SOCKET}"
+start_child "$xvnc" "$DISPLAY_NUM" \
+  -geometry "$GEOMETRY" \
+  -depth 24 \
+  -nolisten tcp \
+  -auth "$XAUTH" \
+  -rfbport -1 \
+  -rfbunixpath "$SOCKET" \
+  -rfbunixmode 0660 \
+  -SecurityTypes None \
+  -AlwaysShared \
+  -BlacklistTimeout 0 \
+  -MaxCutText 262144 \
+  -desktop "$(hostname)" \
+  -Log '*:stderr:30,Connections:stderr:0,VNCSConnST:stderr:0,SConnection:stderr:0,EncodeManager:stderr:0,ComparingUpdateTracker:stderr:0'
+
+# Wait up to 15 s for Xvnc to publish the socket, and stop waiting as soon as
+# it has died.
+waited=0
+while [ ! -S "$SOCKET" ]; do
+  if ! is_running "${pids[0]}"; then
+    log "${xvnc} exited before creating ${SOCKET}"
+    stop_children
+    exit 1
+  fi
+  if ((waited >= 150)); then
+    log "${xvnc} did not create ${SOCKET}"
+    stop_children
+    exit 1
+  fi
+  sleep 0.1
+  waited=$((waited + 1))
+done
+
+# Hand the socket to the pod's group. The socket is 0660; the group has to
+# match the pod's supplementalGroups gid.
+if ! chgrp "$GROUP" "$SOCKET"; then
+  log "could not chgrp ${SOCKET} to group ${GROUP}; the pod may not be able to connect"
+fi
+if ! chmod 0660 "$SOCKET"; then
+  log "could not chmod ${SOCKET} to 0660; the pod may not be able to connect"
+fi
+
+log "starting the desktop session on display ${DISPLAY_NUM}"
+start_child env "DISPLAY=${DISPLAY_NUM}" "XAUTHORITY=${XAUTH}" dbus-launch --exit-with-session "${session_cmd[@]}"
+
+# If any child exits, stop the rest and exit with its status, so systemd
+# restarts the unit (Restart=always; a clean logout logs out too, and the unit
+# comes back with a fresh session).
+set +e
+wait -n
+status=$?
+set -e
+
+log "a child exited with status ${status}, stopping the rest"
+stop_children
+exit "$status"

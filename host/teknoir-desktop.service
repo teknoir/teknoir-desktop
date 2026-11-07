@@ -1,0 +1,66 @@
+# teknoir-desktop host side (host mode).
+#
+# Installed on a Teknoir device by an Ansible role; this file documents the
+# unit, it is not installed by the image.
+#
+# shellcheck disable=all # a systemd unit, not shell: "[Unit]" is not a test
+#
+# It runs an Xvnc session of the device's own desktop environment and
+# publishes the VNC socket in /run/teknoir-desktop/, which the teknoir-desktop
+# pod mounts with a hostPath volume (deploy/examples/host.yaml). The pod's
+# websockify bridges the browser to it. Nothing listens on TCP here: Xvnc is
+# bound to the unix socket only, and that socket is the only way in for the
+# pod. The X display itself has its own MIT-MAGIC-COOKIE
+# ($HOME/.teknoir-desktop.Xauthority), so reaching the X socket is not enough
+# to read the screen. The session script needs the `xauth` package (for the
+# cookie) and `dbus-x11` (for the `dbus-launch` it starts the session under).
+#
+# Drop-in example, /etc/systemd/system/teknoir-desktop.service.d/override.conf:
+#
+#   [Service]
+#   User=someotheruser
+#
+# The unit runs as user teknoir with primary group teknoir-desktop, a system
+# group with the fixed gid 64080 on every Teknoir device (the ansible desktop
+# playbook creates it; device-controller's DESKTOP config hostGroupID is the
+# same gid). systemd keeps the user's own groups as supplementary groups. So
+# the runtime directory (0750) and the socket (0660) belong to teknoir-desktop,
+# and only the teknoir user and a pod with supplementalGroups [64080] can reach
+# them. Xvnc creates the socket with that group; there is no chgrp window.
+#
+# Exit status 78 (EX_CONFIG) from the session script means a package is
+# missing (a desktop session, TigerVNC, xauth or dbus-x11).
+# RestartPreventExitStatus=78 keeps the unit failed instead of restarting it
+# every 5 s; install the package and run `systemctl restart teknoir-desktop`.
+
+[Unit]
+Description=Teknoir desktop X session (VNC on a unix socket for teknoir-desktop)
+Documentation=https://github.com/teknoir/teknoir-desktop
+After=systemd-user-sessions.service
+RequiresMountsFor=/run
+
+[Service]
+Type=simple
+User=teknoir
+Group=teknoir-desktop
+Environment=TEKNOIR_DESKTOP_GROUP=teknoir-desktop
+RuntimeDirectory=teknoir-desktop
+RuntimeDirectoryMode=0750
+# Keep the directory (same inode) across stop and restart: the pod's hostPath
+# bind mount holds this directory's inode, so a directory that systemd deleted
+# and recreated would stay invisible to the pod. /run is a tmpfs, so a reboot
+# still clears it, and the kubelet sets the pod's mounts up again then. The
+# session script removes a stale vnc.sock before Xvnc starts.
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/local/libexec/teknoir-desktop-session
+# Also restart after a clean exit: logging out of the session ends the script
+# with status 0, and the desktop must come back.
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=78
+# The X socket and lock in /tmp belong to this unit only.
+PrivateTmp=yes
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

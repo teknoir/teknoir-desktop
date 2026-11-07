@@ -1,0 +1,144 @@
+# teknoir-desktop, host mode: the desktop belongs to the DEVICE.
+#
+# The container only serves noVNC + websockify on port 6080 and bridges to a
+# VNC unix socket that a systemd unit on the host created (host/
+# teknoir-desktop.service, an Xvnc session of the device's own desktop
+# environment). The host directory holding the socket is mounted in through a
+# hostPath volume.
+#
+# The socket is created 0660 and owned by group teknoir-desktop, gid 64080 on
+# every Teknoir device (the ansible desktop playbook creates the group), so the
+# pod runs with supplementalGroups [64080].
+#
+# As in virtual mode, this is meant to be reached only through the platform's
+# authenticated WireGuard proxy; the NetworkPolicy below enforces it. Never
+# expose 6080 on a node or the LAN.
+#
+# The image reference below is :main for readability. Deployments pin a digest.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: teknoir-desktop
+  labels:
+    app.kubernetes.io/name: teknoir-desktop
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: desktop
+  namespace: teknoir-desktop
+  labels:
+    app.kubernetes.io/name: teknoir-desktop
+    app.kubernetes.io/instance: desktop
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: teknoir-desktop
+      app.kubernetes.io/instance: desktop
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: teknoir-desktop
+        app.kubernetes.io/instance: desktop
+    spec:
+      # The container talks to one unix socket; it needs no Service links and
+      # no API token.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        supplementalGroups: [64080]
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: desktop
+          image: ghcr.io/teknoir/teknoir-desktop:main
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DESKTOP_MODE
+              value: host
+          ports:
+            - name: http
+              containerPort: 6080
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/desktop-healthcheck"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 6080
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            # Read-only: the pod only connects to vnc.sock, it never writes to
+            # the host's runtime directory.
+            - name: vnc
+              mountPath: /run/teknoir-desktop
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # Created by teknoir-desktop.service (RuntimeDirectory=teknoir-desktop).
+        - name: vnc
+          hostPath:
+            path: /run/teknoir-desktop
+            type: Directory
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: desktop
+  namespace: teknoir-desktop
+  labels:
+    app.kubernetes.io/name: teknoir-desktop
+    app.kubernetes.io/instance: desktop
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: teknoir-desktop
+    app.kubernetes.io/instance: desktop
+  ports:
+    - name: http
+      port: 6080
+      targetPort: http
+      protocol: TCP
+---
+# Deny all ingress to the desktop pod. The Service has no authentication
+# behind it, and in host mode the desktop is the device's own session of user
+# teknoir, so without this any pod on the device could control it. With
+# kube-router (k3s) traffic from the pod's own node (kubelet probes, the
+# hostNetwork wg-agent) is still admitted, so the platform's WireGuard proxy
+# still reaches it; on a multi-node Robot schedule the desktop on wg-agent's
+# node (or add an ipBlock rule for that node), or the proxy cannot reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: desktop
+  namespace: teknoir-desktop
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]

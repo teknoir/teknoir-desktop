@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Teknoir desktop</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  Landing page for the Teknoir desktop. It sends the browser straight into the
+  noVNC client with autoconnect on. Parameters the user came with are kept,
+  except the connection target: host, port, encrypt and path are dropped so a
+  link cannot point this client at another server (mandatory.json pins them
+  again inside noVNC). The defaults below only fill in what is missing, so
+  ?view_only=1 or ?resize=scale still work.
+-->
+<script>
+(function () {
+  var defaults = {
+    "autoconnect": "1",
+    "reconnect": "1",
+    "reconnect_delay": "2000",
+    "resize": "remote",
+    "path": "websockify",
+    "show_dot": "1"
+  };
+  var params = new URLSearchParams(window.location.search || "");
+  ["host", "port", "encrypt", "path"].forEach(function (k) {
+    params.delete(k);
+  });
+  Object.keys(defaults).forEach(function (key) {
+    if (!params.has(key) || params.get(key) === "") {
+      params.set(key, defaults[key]);
+    }
+  });
+  var target = "vnc.html?" + params.toString();
+  window.location.replace(target);
+})();
+</script>
+<meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=1&amp;reconnect=1&amp;reconnect_delay=2000&amp;resize=remote&amp;path=websockify&amp;show_dot=1">
+</head>
+<body>
+<p>Opening the Teknoir desktop&hellip;</p>
+<p><a href="vnc.html?autoconnect=1&amp;reconnect=1&amp;reconnect_delay=2000&amp;resize=remote&amp;path=websockify&amp;show_dot=1">Continue</a></p>
+</body>
+</html>

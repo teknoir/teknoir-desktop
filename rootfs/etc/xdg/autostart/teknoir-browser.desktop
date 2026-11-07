@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Web browser
+Comment=Chromium on the Teknoir desktop (sandboxed; see README "Browser sandbox")
+Exec=/usr/local/bin/desktop-browser --autostart
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

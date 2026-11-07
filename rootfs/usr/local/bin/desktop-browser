@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+#
+# teknoir-desktop browser launcher (virtual mode).
+#
+# Started by the XFCE autostart (/etc/xdg/autostart/teknoir-browser.desktop)
+# and by the application-menu entry (/usr/share/applications/
+# teknoir-browser.desktop). It is NOT a child of desktop-entrypoint: closing
+# Chromium is a normal user action and must never stop the desktop.
+#
+# Chromium runs with its renderer sandbox (an unprivileged user namespace).
+# Under the pod's seccomp profile (deploy/seccomp/teknoir-desktop.json, type
+# Localhost) that works; under RuntimeDefault it does not, and this script
+# then refuses to start Chromium instead of silently running it unsandboxed.
+#
+# Everything is configured through environment variables; see README.md
+# ("Browser sandbox"). Every log line starts with "desktop-browser: ".
+set -euo pipefail
+
+PROG=desktop-browser
+
+log() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 64; }
+
+AUTOSTART=0
+for arg in "$@"; do
+  case "$arg" in
+    --autostart) AUTOSTART=1 ;;
+    *) die "unknown argument '${arg}' (--autostart)" ;;
+  esac
+done
+
+BROWSER="${DESKTOP_BROWSER:-true}"
+case "$BROWSER" in
+  true | false) ;;
+  *) die "invalid DESKTOP_BROWSER '${BROWSER}' (true|false)" ;;
+esac
+
+URL="${DESKTOP_BROWSER_URL:-about:blank}"
+FLAGS="${DESKTOP_BROWSER_FLAGS:-}"
+SANDBOX="${DESKTOP_BROWSER_SANDBOX:-auto}"
+DRY_RUN="${DESKTOP_DRY_RUN:-0}"
+PROFILE="${HOME:-/home/desktop}/.config/chromium-desktop"
+
+case "$SANDBOX" in
+  auto | on | off) ;;
+  *) die "invalid DESKTOP_BROWSER_SANDBOX '${SANDBOX}' (auto|on|off)" ;;
+esac
+
+# From the autostart, DESKTOP_BROWSER=false means "no browser"; started from
+# the application menu the user asked for one, so it is started regardless.
+if [ "$AUTOSTART" = 1 ] && [ "$BROWSER" = false ]; then
+  exit 0
+fi
+
+# No "chromium" element here: the command is exec'd separately, and Chromium
+# takes every positional argument as a URL to open.
+args=(
+  --no-first-run
+  --no-default-browser-check
+  "--user-data-dir=${PROFILE}"
+)
+
+# Chromium uses memfd for shared memory and falls back to /dev/shm; the pod
+# gives it a 1Gi memory emptyDir. Only when that is missing or too small is the
+# fallback moved to /tmp.
+shm_kib="$(df -k --output=size /dev/shm 2>/dev/null | tail -n 1 | tr -d ' ' || true)"
+case "$shm_kib" in
+  '' | *[!0-9]*) shm_kib=0 ;;
+esac
+if ((shm_kib < 512 * 1024)); then
+  args+=(--disable-dev-shm-usage)
+fi
+
+if [ -n "$FLAGS" ]; then
+  read -r -a extra_flags <<<"$FLAGS"
+  args+=("${extra_flags[@]}")
+fi
+
+sandboxed=1
+case "$SANDBOX" in
+  off)
+    args+=(--no-sandbox)
+    sandboxed=0
+    ;;
+  *)
+    # The probe: can this container create an unprivileged user namespace (with
+    # mount, PID and network namespaces on top, as Chromium's zygote does)?
+    if [ "$DRY_RUN" != 1 ] &&
+      ! unshare --user --map-root-user --pid --net --fork --root=/ true >/dev/null 2>&1; then
+      sandboxed=0
+    fi
+    ;;
+esac
+
+args+=("$URL")
+
+if [ "$DRY_RUN" = 1 ]; then
+  line="RUN: chromium"
+  for arg in "${args[@]}"; do
+    line+=" $(printf '%q' "$arg")"
+  done
+  printf '%s\n' "$line"
+  exit 0
+fi
+
+if [ "$sandboxed" = 0 ] && [ "$SANDBOX" != off ]; then
+  if [ "$SANDBOX" = on ]; then
+    log "Chromium not started: the sandbox is required (DESKTOP_BROWSER_SANDBOX=on) and no usable sandbox is available (user namespaces are blocked; run the pod with the teknoir-desktop seccomp profile, see README \"Browser sandbox\")"
+  else
+    log "Chromium not started: no usable sandbox (user namespaces are blocked; run the pod with the teknoir-desktop seccomp profile, see README \"Browser sandbox\"), or set DESKTOP_BROWSER_SANDBOX=off"
+  fi
+  exit 78
+fi
+
+if [ "$SANDBOX" = off ]; then
+  log "warning: the Chromium renderer sandbox is off (DESKTOP_BROWSER_SANDBOX=off); only browse trusted pages"
+fi
+
+# Chromium handles its own lock when it runs in this pod: a second start hands
+# the URL to the running browser. Remove the Singleton files only when no
+# Chromium of this user is running; then they come from a pod that stopped
+# uncleanly, they name the old pod's hostname, and Chromium would refuse the
+# profile ("in use on another computer").
+if ! pgrep -u "$(id -u)" -x chromium >/dev/null 2>&1; then
+  rm -f "${PROFILE}/SingletonLock" "${PROFILE}/SingletonSocket" "${PROFILE}/SingletonCookie"
+fi
+
+exec chromium "${args[@]}"

@@ -1,0 +1,3 @@
+ENV: DESKTOP_DRY_RUN=1 DESKTOP_CLIPBOARD=sometimes
+EXIT: 64
+STDERR: desktop-entrypoint: invalid DESKTOP_CLIPBOARD 'sometimes' (both|to-desktop|from-desktop|off)

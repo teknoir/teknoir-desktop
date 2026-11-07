@@ -1,0 +1,15 @@
+---
+# hadolint configuration for teknoir-desktop.
+#
+# Only two rules are ignored, both deliberately:
+ignored:
+  # DL3008: apt package versions are not pinned. Debian trixie is the pinned
+  # base (by digest) and its archive only keeps the current version of each
+  # package, so pinning a version in the Dockerfile would break the build as
+  # soon as the archive moves on. The base image digest is the real pin.
+  - DL3008
+  # DL3020: ADD with a remote URL. Used once, for the noVNC tarball, because
+  # ADD downloads it and RUN verifies NOVNC_SHA256 with sha256sum -c; with
+  # COPY the checksum could not be verified. (Docker recommends ADD for a
+  # remote archive with a checksum.)
+  - DL3020

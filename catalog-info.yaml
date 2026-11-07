@@ -1,0 +1,23 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: teknoir-desktop
+  title: Teknoir desktop
+  description: >-
+    Browser remote desktop for the Teknoir platform (TeknoirBot VMs and edge
+    devices), served by noVNC and websockify.
+  annotations:
+    github.com/project-slug: teknoir/teknoir-desktop
+  tags:
+    - desktop
+    - novnc
+    - vnc
+    - teknoirbot
+  links:
+    - title: Repository
+      url: https://github.com/teknoir/teknoir-desktop
+spec:
+  type: service
+  lifecycle: experimental
+  owner: group:default/teknoir
+  system: teknoirbot

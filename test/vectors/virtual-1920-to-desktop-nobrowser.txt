@@ -1,0 +1,4 @@
+ENV: DESKTOP_DRY_RUN=1 DESKTOP_GEOMETRY=1920x1080 DESKTOP_CLIPBOARD=to-desktop DESKTOP_BROWSER=false
+RUN: Xvnc :1 -geometry 1920x1080 -depth 24 -nolisten tcp -auth /run/desktop/Xauthority -rfbport -1 -rfbunixpath /run/desktop/vnc.sock -rfbunixmode 0600 -SecurityTypes None -AlwaysShared -BlacklistTimeout 0 -MaxCutText 262144 -AcceptCutText=1 -SendCutText=0 -desktop TeknoirBot -Log \*:stderr:30\,Connections:stderr:0\,VNCSConnST:stderr:0\,SConnection:stderr:0\,EncodeManager:stderr:0\,ComparingUpdateTracker:stderr:0
+RUN: env DISPLAY=:1 XAUTHORITY=/run/desktop/Xauthority dbus-launch --exit-with-session startxfce4
+RUN: websockify --web /opt/novnc --file-only --heartbeat 30 --idle-timeout 0 --unix-target /run/desktop/vnc.sock 0.0.0.0:6080
