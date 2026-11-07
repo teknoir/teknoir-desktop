@@ -84,15 +84,33 @@ RUN echo "${NOVNC_SHA256}  /tmp/novnc.tar.gz" | sha256sum -c - \
 
 COPY rootfs/ /
 
-# The landing page and the health probe file are added to the noVNC tree at
-# build time, so the container filesystem can stay read-only at runtime.
-# mandatory.json pins the WebSocket target (host and path), so a link cannot
-# point the client at another server; vnc_lite.html is removed above because
-# it ignores it.
+# The landing page, the health probe file and the shared-desktop notice banner
+# are added to the noVNC tree at build time, so the container filesystem can
+# stay read-only at runtime. mandatory.json pins the WebSocket target (host and
+# path), so a link cannot point the client at another server; vnc_lite.html is
+# removed above because it ignores it.
+#
+# The notice: the page loads teknoir-notice.js, which fetches
+# teknoir-notice.json from the same origin. That name is a symlink to
+# /run/desktop/notice.json (written by the entrypoint, an emptyDir at
+# runtime), which websockify follows; without a notice the entrypoint writes
+# {"text": ""}, and only in host mode, where nothing writes /run/desktop, does
+# the link stay dangling and the page get a 404. Only that one file is
+# linked, never the directory: the rest of /run/desktop (Xauthority, vnc.sock)
+# must not become reachable. The sed inserts the script tag, and the grep
+# fails the build if </head> is not in vnc.html, where a silently unchanged
+# file would mean a banner that never loads. The last grep checks that noVNC
+# still marks a connection with the noVNC_connected class, which the script
+# watches to fetch again on connect.
 RUN chmod 0755 /usr/local/bin/desktop-* \
  && cp /opt/novnc-extra/index.html /opt/novnc/index.html \
  && cp /opt/novnc-extra/healthz /opt/novnc/healthz \
  && cp /opt/novnc-extra/mandatory.json /opt/novnc/mandatory.json \
+ && cp /opt/novnc-extra/teknoir-notice.js /opt/novnc/teknoir-notice.js \
+ && ln -s /run/desktop/notice.json /opt/novnc/teknoir-notice.json \
+ && sed -i 's#</head>#<script src="teknoir-notice.js?v=2" defer></script></head>#' /opt/novnc/vnc.html \
+ && grep -qF '<script src="teknoir-notice.js?v=2" defer></script>' /opt/novnc/vnc.html \
+ && grep -qF 'classList.add("noVNC_connected")' /opt/novnc/app/ui.js \
  && groupadd -g 1000 desktop \
  && useradd -u 1000 -g 1000 -d /home/desktop -m -s /bin/bash desktop \
  && install -d -o 1000 -g 1000 -m 0750 /run/desktop \

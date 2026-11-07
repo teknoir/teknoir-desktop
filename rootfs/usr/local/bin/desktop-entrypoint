@@ -54,6 +54,22 @@ case "$DRY_RUN" in
   *) die "invalid DESKTOP_DRY_RUN '${DRY_RUN}' (0|1)" ;;
 esac
 
+# DESKTOP_NOTICE is the shared-desktop banner (README "Notice banner"). Trim
+# it here, so that both modes agree on what "set" means: a value that is empty
+# after the trimming counts as unset. The whitespace is ASCII and named
+# explicitly: [[:space:]] follows the locale, and the image's en_US.UTF-8 would
+# also trim U+3000 or U+2028 where the tests' C locale keeps them.
+NOTICE="${DESKTOP_NOTICE:-}"
+# bash's pattern trim below is quadratic in the length (a value of one letter
+# and 120000 spaces holds the start for over a minute), so a value of more
+# than 4096 bytes is not trimmed: the 300-character check refuses it (host
+# mode only logs it). Bytes, not ${#NOTICE}, which counts in the locale.
+if [ "$(printf '%s' "$NOTICE" | wc -c)" -le 4096 ]; then
+  notice_ws=$' \t\n\v\f\r'
+  NOTICE="${NOTICE#"${NOTICE%%[!"$notice_ws"]*}"}"
+  NOTICE="${NOTICE%"${NOTICE##*[!"$notice_ws"]}"}"
+fi
+
 if [ "$MODE" = virtual ]; then
   SOCKET="${DESKTOP_SOCKET:-/run/desktop/vnc.sock}"
 
@@ -91,6 +107,33 @@ if [ "$MODE" = virtual ]; then
     *) die "invalid DESKTOP_BROWSER_SANDBOX '${BROWSER_SANDBOX}' (auto|on|off)" ;;
   esac
 
+  # The notice is one line of UTF-8 text in a banner: text that is not UTF-8
+  # is refused, and so is a control character (a tab, a newline, U+0085 NEL,
+  # U+2028/U+2029). Both checks are in python3, whose classes do not follow
+  # the locale the way bash's [[:cntrl:]] does. The length is counted in
+  # characters, not bytes ("å" is two bytes).
+  if [ -n "$NOTICE" ]; then
+    notice_problem="$(python3 -I -c '
+import sys, unicodedata
+text = sys.argv[1]
+try:
+    text.encode("utf-8")
+except UnicodeEncodeError:
+    print("not UTF-8")
+    sys.exit()
+if len(text) > 300:
+    print("at most 300 characters")
+elif any(unicodedata.category(c) == "Cc" or c in "\u2028\u2029" for c in text):
+    print("no control characters")
+' "$NOTICE")"
+    if [ -n "$notice_problem" ]; then
+      die "invalid DESKTOP_NOTICE (${notice_problem})"
+    fi
+  fi
+  # Test-only: lets the suite write the notice into its own directory instead
+  # of /run/desktop, which a host checkout does not have.
+  NOTICE_FILE="${DESKTOP_NOTICE_FILE:-/run/desktop/notice.json}"
+
   # The XFCE session, and the browser autostart it runs, must see the values
   # validated here.
   export DESKTOP_BROWSER="$BROWSER" \
@@ -108,6 +151,11 @@ if [ "$MODE" = virtual ]; then
   XAUTH=/run/desktop/Xauthority
 else
   SOCKET="${DESKTOP_SOCKET:-/run/teknoir-desktop/vnc.sock}"
+  # The host desktop is the device's own session, not a shared bot desktop, so
+  # it has no notice. Say so once instead of ignoring the variable silently.
+  if [ -n "$NOTICE" ]; then
+    log "DESKTOP_NOTICE is ignored in host mode"
+  fi
 fi
 
 # --- the commands this container runs ---------------------------------------
@@ -175,6 +223,44 @@ dry_run_line() {
 # a checkout (the test suite runs it from the repository).
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --- the notice file --------------------------------------------------------
+
+# teknoir-notice.js in the page fetches teknoir-notice.json from the same
+# origin, and the Dockerfile symlinks that name to NOTICE_FILE. json.dump with
+# ensure_ascii=False keeps the text as UTF-8, and the temp-file-plus-rename
+# means a reader never sees a half-written file.
+#
+# Without a notice the file is still written, as {"text": ""}: the page fetches
+# it on every load, and a missing file would be a 404 in the browser console.
+# Writing it also replaces a notice from an earlier start (/run/desktop is an
+# emptyDir and survives a container restart).
+write_notice() {
+  local tmp
+  tmp="$(mktemp "${NOTICE_FILE}.XXXXXX")" || {
+    log "cannot create a temporary file next to ${NOTICE_FILE}"
+    exit 1
+  }
+  # 0644 whatever the umask: the file has to stay readable by websockify.
+  chmod 0644 "$tmp"
+  if ! python3 -I -c '
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump({"text": sys.argv[2]}, fh, ensure_ascii=False)
+' "$tmp" "$NOTICE"; then
+    rm -f "$tmp"
+    log "cannot write ${NOTICE_FILE}"
+    exit 1
+  fi
+  # -T: never move the file into a directory (or a symlink to one) that a
+  # desktop user left at this path in the emptyDir; replace a symlink, refuse
+  # a directory.
+  if ! mv -fT "$tmp" "$NOTICE_FILE"; then
+    rm -f "$tmp"
+    log "cannot move the notice into ${NOTICE_FILE}"
+    exit 1
+  fi
+}
+
 if [ "$DRY_RUN" = 1 ]; then
   if [ "$MODE" = virtual ]; then
     dry_run_line "${xvnc_cmd[@]}"
@@ -184,6 +270,14 @@ if [ "$DRY_RUN" = 1 ]; then
     fi
   fi
   dry_run_line "${websockify_cmd[@]}"
+  # The notice file is not written in a dry run; say what it would hold.
+  if [ "$MODE" = virtual ] && [ -n "$NOTICE" ]; then
+    notice_json="$(python3 -I -c '
+import json, sys
+print(json.dumps({"text": sys.argv[1]}, ensure_ascii=False))
+' "$NOTICE")"
+    printf 'notice: %s\n' "$notice_json"
+  fi
   exit 0
 fi
 
@@ -245,6 +339,12 @@ trap on_term TERM INT
 # --- start ------------------------------------------------------------------
 
 if [ "$MODE" = virtual ]; then
+  # The notice comes first: websockify serves it, and the page fetches it as
+  # soon as noVNC loads. An unset notice writes {"text": ""}, which also
+  # replaces a notice an earlier container start left in the /run/desktop
+  # emptyDir.
+  write_notice
+
   # The X server bind-mounts its own socket here. /tmp is usually a fresh
   # emptyDir in this pod (see deploy/examples), so the directory has to exist
   # and be writable by the desktop user before Xvnc starts.

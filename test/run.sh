@@ -19,6 +19,7 @@ ENTRYPOINT="rootfs/usr/local/bin/desktop-entrypoint"
 BROWSER="rootfs/usr/local/bin/desktop-browser"
 HEALTHCHECK="rootfs/usr/local/bin/desktop-healthcheck"
 INDEX="rootfs/opt/novnc-extra/index.html"
+NOTICE_JS="rootfs/opt/novnc-extra/teknoir-notice.js"
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/teknoir-desktop-test.XXXXXX")"
 # Background servers the health-probe tests start.
@@ -227,6 +228,86 @@ if data.get("path") != "websockify":
   else
     fail dockerfile-novnc "$problems"
   fi
+
+  # The notice banner script: it must exist and parse. Its behaviour is
+  # test_notice_script below; this only catches a file that is not there.
+  if [ ! -f "$NOTICE_JS" ]; then
+    fail novnc-notice-script "$NOTICE_JS is missing"
+  elif ! command -v node >/dev/null 2>&1; then
+    skip novnc-notice-script "node is not on PATH"
+  elif node --check "$NOTICE_JS" >"$TMP/notice-syntax.out" 2>&1; then
+    pass novnc-notice-script
+  else
+    fail novnc-notice-script "$(tr '\n' '|' <"$TMP/notice-syntax.out")"
+  fi
+
+  # vnc.html declares no charset and websockify sends none, so Chrome decodes
+  # this classic script as windows-1252: any non-ASCII byte is mojibake.
+  if python3 -I -c 'import sys; open(sys.argv[1], "rb").read().decode("ascii")' "$NOTICE_JS" >"$TMP/notice-ascii.out" 2>&1; then
+    pass novnc-notice-ascii
+  else
+    fail novnc-notice-ascii "$NOTICE_JS is not pure ASCII (use \\u escapes)"
+  fi
+
+  # The Dockerfile puts the script in the noVNC tree, loads it from vnc.html
+  # before </head>, checks that the insert happened (the build fails when
+  # </head> is not in the file), and symlinks the one notice file next to the
+  # page. Exactly one file, never the directory: /run/desktop also holds
+  # Xauthority and vnc.sock.
+  problems=""
+  want='cp /opt/novnc-extra/teknoir-notice.js /opt/novnc/teknoir-notice.js'
+  grep -qF "$want" Dockerfile || problems+="Dockerfile does not '$want'; "
+  want='ln -s /run/desktop/notice.json /opt/novnc/teknoir-notice.json'
+  grep -qF "$want" Dockerfile || problems+="Dockerfile does not '$want'; "
+  # Every ln in the Dockerfile, exactly: any other link (a /run/desktop
+  # directory link however spelled, /run, a relative target, other flags)
+  # fails here and has to be reviewed. COPY rootfs/ / keeps symlinks, so
+  # rootfs/ must have none.
+  local lns want_lns
+  lns="$(grep -vE '^[[:space:]]*#' Dockerfile \
+    | grep -E '(^|[[:space:];&|(/])ln([[:space:]]|$)' \
+    | sed -E 's/^[[:space:]]*(&&[[:space:]]*)?//; s/[[:space:]]*\\$//')"
+  want_lns=$'ln -s /run/desktop/notice.json /opt/novnc/teknoir-notice.json\nln -s /usr/bin/Xtigervnc /usr/local/bin/Xvnc'
+  if [ "$lns" != "$want_lns" ]; then
+    problems+="the Dockerfile's ln commands are not exactly the notice and Xvnc links: '$(printf '%s' "$lns" | tr '\n' ';')'; "
+  fi
+  if [ -n "$(find rootfs -type l -print -quit)" ]; then
+    problems+="rootfs/ contains symlinks: $(find rootfs -type l | tr '\n' ' '); "
+  fi
+  # The script URL carries index.html's cache key "v": bumping v must also
+  # change the script's URL, or a browser keeps running a cached old script
+  # under a new vnc.html.
+  local page_v
+  page_v="$(sed -n 's/.*"v": "\([0-9][0-9]*\)".*/\1/p' rootfs/opt/novnc-extra/index.html)"
+  [ -n "$page_v" ] || problems+="index.html has no \"v\" default; "
+  # ... and both static URLs (the meta refresh and the Continue link) carry
+  # the same number, so the page and the script tag cannot drift apart.
+  local static_n static_v
+  static_n="$(grep -o '&amp;v=[0-9][0-9]*' rootfs/opt/novnc-extra/index.html | wc -l)"
+  static_v="$(grep -o '&amp;v=[0-9][0-9]*' rootfs/opt/novnc-extra/index.html | sort -u | tr '\n' ' ')"
+  if [ "$static_n" != 2 ] || [ "$static_v" != "&amp;v=${page_v} " ]; then
+    problems+="index.html's two static URLs do not both carry v=${page_v} (found '$static_v', $static_n of them); "
+  fi
+  want="s#</head>#<script src=\"teknoir-notice.js?v=${page_v}\" defer></script></head>#"
+  grep -qF "$want" Dockerfile || problems+="Dockerfile does not insert the script tag with v=${page_v} before </head>; "
+  want="grep -qF '<script src=\"teknoir-notice.js?v=${page_v}\" defer></script>' /opt/novnc/vnc.html"
+  grep -qF "$want" Dockerfile || problems+="Dockerfile does not check the vnc.html insert; "
+  local sed_line check_line
+  sed_line="$(grep -nF 's#</head>#<script src="teknoir-notice.js?v=' Dockerfile | cut -d: -f1)"
+  check_line="$(grep -nF "$want" Dockerfile | cut -d: -f1)"
+  if [ -z "$sed_line" ] || [ -z "$check_line" ] || [ "$sed_line" -ge "$check_line" ]; then
+    problems+="the vnc.html insert is not checked after the sed; "
+  fi
+  # The re-fetch on connect watches the noVNC_connected class, and three
+  # comments rely on this build check: without it a noVNC upgrade that renames
+  # the class silently kills the re-fetch.
+  want="grep -qF 'classList.add(\"noVNC_connected\")' /opt/novnc/app/ui.js"
+  grep -qF "$want" Dockerfile || problems+="Dockerfile does not check that noVNC still sets noVNC_connected; "
+  if [ -z "$problems" ]; then
+    pass dockerfile-notice
+  else
+    fail dockerfile-notice "$problems"
+  fi
 }
 
 # Debian's /etc/chromium.d/dev-shm adds --disable-dev-shm-usage whenever
@@ -326,6 +407,431 @@ test_entrypoint_vectors() {
     [ -f "$file" ] || continue
     run_vector "$file"
   done
+}
+
+# --- the shared-desktop notice ----------------------------------------------
+
+# The locale's name as locale -a prints it on this host: glibc says "C.utf8"
+# and "en_US.utf8" for C.UTF-8 and en_US.UTF-8.
+locale_available() {
+  local want
+  want="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '-')"
+  locale -a 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '-' | grep -qx "$want"
+}
+
+# The notice (README "Notice banner") is one line in the dry-run output. The
+# vector error-notice-control.txt carries a raw ESC byte; an "ENV: K=V ..."
+# line is split with read -a on spaces, tabs and newlines, so those (and
+# spaces inside a notice) are tested here instead.
+test_notice() {
+  local out err rc line dir="$TMP/notice-dry"
+  mkdir -p "$dir"
+
+  # Unset: nothing is added (the virtual-defaults vector already pins the rest
+  # of the output byte for byte).
+  out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+    bash "$ENTRYPOINT" 2>/dev/null)"
+  rc=$?
+  local unset_out="$out"
+  if [ "$rc" = 0 ] && ! printf '%s\n' "$out" | grep -q '^notice:'; then
+    pass notice-unset
+  else
+    fail notice-unset "a notice line appeared without DESKTOP_NOTICE"
+  fi
+
+  # Trimmed, non-ASCII kept as characters, markup kept literally.
+  out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+    DESKTOP_NOTICE='  Hej då, scout <b>bot</b>  ' bash "$ENTRYPOINT" 2>/dev/null)"
+  line="$(printf '%s\n' "$out" | sed -n 's/^notice: //p')"
+  if [ "$(printf '%s\n' "$out" | grep -c '^notice: ')" = 1 ] &&
+    [ "$line" = '{"text": "Hej då, scout <b>bot</b>"}' ] &&
+    [ "$(printf '%s\n' "$out" | sed '$d')" = "$unset_out" ] &&
+    [ "$(printf '%s\n' "$out" | tail -n 1)" = 'notice: {"text": "Hej då, scout <b>bot</b>"}' ]; then
+    pass notice-dry-run-trimmed
+  else
+    fail notice-dry-run-trimmed "notice line '$line'"
+  fi
+
+  # 300 characters, each one two bytes in UTF-8: accepted, so the count is of
+  # characters and not of bytes.
+  local text300 text301
+  text300="$(printf 'å%.0s' {1..300})"
+  text301="${text300}å"
+  out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+    DESKTOP_NOTICE="$text300" bash "$ENTRYPOINT" 2>/dev/null)"
+  line="$(printf '%s\n' "$out" | sed -n 's/^notice: //p')"
+  if [ "$(printf '%s' "$text300" | wc -c)" -gt 300 ] &&
+    python3 -I -c '
+import json, sys
+sys.exit(0 if json.loads(sys.argv[1])["text"] == sys.argv[2] else 1)
+' "$line" "$text300" 2>/dev/null; then
+    pass notice-length-300
+  else
+    fail notice-length-300 "the 300-character notice was not printed"
+  fi
+
+  out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+    DESKTOP_NOTICE="$text301" bash "$ENTRYPOINT" 2>"$dir/err")"
+  rc=$?
+  err="$(cat "$dir/err")"
+  if [ "$rc" = 64 ] && [ "$err" = "desktop-entrypoint: invalid DESKTOP_NOTICE (at most 300 characters)" ]; then
+    pass notice-length-301
+  else
+    fail notice-length-301 "exit $rc, stderr '$err'"
+  fi
+
+  # Control characters inside are refused, not only the whitespace ones: the
+  # rule is nothing below U+0020 and no U+007F, plus the C1 controls and
+  # U+2028/U+2029. The stderr is compared exactly, as in the vectors.
+  local name value
+  local -a ctl_names=(tab newline cr soh esc del)
+  local -a ctl_values=($'a\tb' $'a\nb' $'a\rb' $'a\x01b' $'a\x1bb' $'a\x7fb')
+  local i
+  for i in "${!ctl_names[@]}"; do
+    name="${ctl_names[$i]}"
+    value="${ctl_values[$i]}"
+    out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+      DESKTOP_NOTICE="$value" bash "$ENTRYPOINT" 2>"$dir/err")"
+    rc=$?
+    err="$(cat "$dir/err")"
+    if [ "$rc" = 64 ] &&
+      [ "$err" = "desktop-entrypoint: invalid DESKTOP_NOTICE (no control characters)" ]; then
+      pass "notice-control-$name"
+    else
+      fail "notice-control-$name" "exit $rc, stderr '$err'"
+    fi
+  done
+
+  # Values the C locale and a UTF-8 locale treat differently: C1 controls,
+  # U+2028, invalid UTF-8 and a leading U+2028 (which a locale-sensitive trim
+  # would remove). Each one must be refused the same way in both locales.
+  local -a ref_names=(del soh c1 u2028 lead-u2028 not-utf8)
+  local -a ref_values=($'a\x7fb' $'a\x01b' $'a\xc2\x85b' $'a\xe2\x80\xa8b' $'\xe2\x80\xa8ab' $'a\xffb')
+  local -a ref_wants=(
+    "no control characters" "no control characters" "no control characters"
+    "no control characters" "no control characters" "not UTF-8"
+  )
+  local loc
+  for loc in none C.UTF-8; do
+    if [ "$loc" != none ] && ! locale_available "$loc"; then
+      skip "notice-refused-all-$loc" "locale $loc is not installed on this host"
+      continue
+    fi
+    for i in "${!ref_names[@]}"; do
+      name="${ref_names[$i]}"
+      value="${ref_values[$i]}"
+      if [ "$loc" = none ]; then
+        out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+          DESKTOP_NOTICE="$value" bash "$ENTRYPOINT" 2>"$dir/err")"
+      else
+        out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+          LC_ALL="$loc" DESKTOP_NOTICE="$value" bash "$ENTRYPOINT" 2>"$dir/err")"
+      fi
+      rc=$?
+      err="$(cat "$dir/err")"
+      if [ "$rc" = 64 ] &&
+        [ "$err" = "desktop-entrypoint: invalid DESKTOP_NOTICE (${ref_wants[$i]})" ]; then
+        pass "notice-refused-$name-$loc"
+      else
+        fail "notice-refused-$name-$loc" "exit $rc, stderr '$err'"
+      fi
+    done
+  done
+
+  # A very long value is refused at once: bash's pattern trim is quadratic,
+  # and 100000 trailing spaces would hold the start for over a minute.
+  local long
+  long="a$(printf '%*s' 100000 '')"
+  out="$(timeout 10 env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+    DESKTOP_NOTICE="$long" bash "$ENTRYPOINT" 2>"$dir/err")"
+  rc=$?
+  err="$(cat "$dir/err")"
+  if [ "$rc" = 64 ] && [ "$err" = "desktop-entrypoint: invalid DESKTOP_NOTICE (at most 300 characters)" ]; then
+    pass notice-long-refused-fast
+  else
+    fail notice-long-refused-fast "exit $rc (124 = timed out), stderr '$err'"
+  fi
+
+  # The bound is exact, as the README says: 4096 bytes are still trimmed,
+  # 4097 bytes are refused untrimmed.
+  local at_bound
+  at_bound="a$(printf '%*s' 4095 '')"
+  out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+    DESKTOP_NOTICE="$at_bound" bash "$ENTRYPOINT" 2>"$dir/err")"
+  rc=$?
+  if [ "$rc" = 0 ] && [ "$(printf '%s\n' "$out" | grep '^notice:')" = 'notice: {"text": "a"}' ]; then
+    pass notice-bound-4096-trimmed
+  else
+    fail notice-bound-4096-trimmed "exit $rc, stderr '$(cat "$dir/err")'"
+  fi
+  out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+    DESKTOP_NOTICE="$at_bound " bash "$ENTRYPOINT" 2>"$dir/err")"
+  rc=$?
+  err="$(cat "$dir/err")"
+  if [ "$rc" = 64 ] && [ "$err" = "desktop-entrypoint: invalid DESKTOP_NOTICE (at most 300 characters)" ]; then
+    pass notice-bound-4097-refused
+  else
+    fail notice-bound-4097-refused "exit $rc, stderr '$err'"
+  fi
+
+  # Whitespace only counts as unset, not as a one-space notice.
+  out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+    DESKTOP_NOTICE='    ' bash "$ENTRYPOINT" 2>/dev/null)"
+  rc=$?
+  if [ "$rc" = 0 ] && ! printf '%s\n' "$out" | grep -q '^notice:'; then
+    pass notice-whitespace-unset
+  else
+    fail notice-whitespace-unset "exit $rc, output '$out'"
+  fi
+
+  # Host mode has no notice file; it says so once and carries on.
+  out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+    DESKTOP_MODE=host DESKTOP_NOTICE='shared desktop' bash "$ENTRYPOINT" 2>"$dir/err")"
+  rc=$?
+  err="$(cat "$dir/err")"
+  if [ "$rc" = 0 ] && [ "$(printf '%s\n' "$err" | grep -c 'DESKTOP_NOTICE is ignored in host mode')" = 1 ] &&
+    ! printf '%s\n' "$out" | grep -q '^notice:'; then
+    pass notice-host-ignored
+  else
+    fail notice-host-ignored "exit $rc, stderr '$err', stdout '$out'"
+  fi
+
+  # Host mode does not validate what it ignores: a tab or 301 characters are
+  # not an error there.
+  for name in tab long; do
+    if [ "$name" = tab ]; then value=$'a\tb'; else value="$text301"; fi
+    out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+      DESKTOP_MODE=host DESKTOP_NOTICE="$value" bash "$ENTRYPOINT" 2>"$dir/err")"
+    rc=$?
+    err="$(cat "$dir/err")"
+    if [ "$rc" = 0 ] && [ "$err" = "desktop-entrypoint: DESKTOP_NOTICE is ignored in host mode" ] &&
+      ! printf '%s\n' "$out" | grep -q '^notice:'; then
+      pass "notice-host-invalid-ignored-$name"
+    else
+      fail "notice-host-invalid-ignored-$name" "exit $rc, stderr '$err', stdout '$out'"
+    fi
+  done
+}
+
+# One notice dry run under one locale. NAME is the test name, WANT is
+# "unset", "json:<text>" (one notice line holding that text) or
+# "refused:<message>" (exit 64 and that reason on stderr).
+notice_locale_case() {
+  local name="$1" want="$2" value="$3" loc="$4" out rc err line
+  if [ "$loc" = none ]; then
+    out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+      DESKTOP_NOTICE="$value" bash "$ENTRYPOINT" 2>"$TMP/notice-locale.err")"
+  else
+    out="$(env -i PATH="$TEST_PATH" HOME=/home/desktop DESKTOP_DRY_RUN=1 \
+      LC_ALL="$loc" DESKTOP_NOTICE="$value" bash "$ENTRYPOINT" 2>"$TMP/notice-locale.err")"
+  fi
+  rc=$?
+  err="$(cat "$TMP/notice-locale.err")"
+  case "$want" in
+    unset)
+      if [ "$rc" = 0 ] && ! printf '%s\n' "$out" | grep -q '^notice:'; then
+        pass "$name"
+      else
+        fail "$name" "exit $rc, a notice line appeared: '$out'"
+      fi
+      ;;
+    json:*)
+      line="$(printf '%s\n' "$out" | sed -n 's/^notice: //p')"
+      if [ "$(printf '%s\n' "$out" | grep -c '^notice: ')" = 1 ] &&
+        python3 -I -c '
+import json, sys
+sys.exit(0 if json.loads(sys.argv[1])["text"] == sys.argv[2] else 1)
+' "$line" "${want#json:}" 2>/dev/null; then
+        pass "$name"
+      else
+        fail "$name" "exit $rc, notice line '$line'"
+      fi
+      ;;
+    refused:*)
+      if [ "$rc" = 64 ] &&
+        [ "$err" = "desktop-entrypoint: invalid DESKTOP_NOTICE (${want#refused:})" ]; then
+        pass "$name"
+      else
+        fail "$name" "exit $rc, stderr '$err'"
+      fi
+      ;;
+  esac
+}
+
+# The notice rules are the same in every locale, and that is not automatic: a
+# bash [[:space:]]/[[:cntrl:]] test follows the locale, and the image runs
+# en_US.UTF-8 while the suite runs under env -i (C). C.UTF-8 has the same
+# character classes as the image's en_US.UTF-8. A locale this host does not
+# have is skipped, not failed.
+test_notice_locale() {
+  local loc text300 text301
+  text300="$(printf 'å%.0s' {1..300})"
+  text301="${text300}å"
+  for loc in none C.UTF-8 en_US.UTF-8; do
+    if [ "$loc" != none ] && ! locale_available "$loc"; then
+      skip "notice-locale-$loc" "locale $loc is not installed on this host"
+      continue
+    fi
+    notice_locale_case "notice-locale-trim-$loc" "json:Hej då" '  Hej då  ' "$loc"
+    notice_locale_case "notice-locale-length-300-$loc" "json:$text300" "$text300" "$loc"
+    notice_locale_case "notice-locale-length-301-$loc" "refused:at most 300 characters" "$text301" "$loc"
+    notice_locale_case "notice-locale-tab-$loc" "refused:no control characters" $'a\tb' "$loc"
+    notice_locale_case "notice-locale-del-$loc" "refused:no control characters" $'a\x7fb' "$loc"
+    notice_locale_case "notice-locale-nel-$loc" "refused:no control characters" $'a\xc2\x85b' "$loc"
+    notice_locale_case "notice-locale-u0080-$loc" "refused:no control characters" $'a\xc2\x80b' "$loc"
+    notice_locale_case "notice-locale-u2028-$loc" "refused:no control characters" $'a\xe2\x80\xa8b' "$loc"
+    notice_locale_case "notice-locale-u2029-$loc" "refused:no control characters" $'a\xe2\x80\xa9b' "$loc"
+    notice_locale_case "notice-locale-not-utf8-$loc" "refused:not UTF-8" $'a\xffb' "$loc"
+    # The trim is ASCII only: U+3000 is not whitespace here, so it stays.
+    notice_locale_case "notice-locale-lead-u3000-$loc" "json:"$'\xe3\x80\x80'"hello" $'\xe3\x80\x80hello' "$loc"
+    notice_locale_case "notice-locale-only-u3000-$loc" "json:"$'\xe3\x80\x80\xe3\x80\x80' $'\xe3\x80\x80\xe3\x80\x80' "$loc"
+    notice_locale_case "notice-locale-blank-unset-$loc" unset $' \t ' "$loc"
+  done
+}
+
+# The real write path, without a dry run. The entrypoint writes the notice at
+# the head of the virtual start section, then runs mkdir -p /tmp/.X11-unix and
+# reads the X cookie with od. Stubs stop it there: od exits 97, mkdir only
+# records its arguments in $stop/calls, and rm records its arguments and
+# deletes only paths inside $dir, so the run creates, changes or deletes
+# nothing outside $dir (not the host's /tmp/.X11-unix, an X lock or socket).
+# The first three runs must end with exit 97 and exactly the one mkdir call. A
+# host with /run/desktop is skipped anyway: the shell's own redirections (the
+# Xauthority write) cannot be stubbed if a change ever moves them before od.
+test_notice_file() {
+  local dir="$TMP/notice-run" file="$TMP/notice-run/notice.json" rc inode
+  local stop="$TMP/bin-stop"
+  local stop_path="$stop:$TEST_PATH"
+  if [ -e /run/desktop ]; then
+    skip notice-file "/run/desktop exists here, and a run that got past the od stub would write its Xauthority"
+    return
+  fi
+  mkdir -p "$dir" "$stop"
+  printf '#!/bin/sh\nexit 97\n' >"$stop/od"
+  cat >"$stop/mkdir" <<'SH'
+#!/bin/sh
+printf 'mkdir %s\n' "$*" >>"$(dirname "$0")/calls"
+SH
+  cat >"$stop/rm" <<SH
+#!/bin/sh
+printf 'rm %s\n' "\$*" >>"\$(dirname "\$0")/calls"
+# Record only, except a path inside this test's own notice dir: write_notice
+# removes its temp file there when the move fails, and the result must be
+# visible. Nothing outside that dir (the host's X lock or socket) is ever
+# removed by this stub: only one path component directly inside $dir.
+for arg in "\$@"; do
+  case "\$arg" in
+    "$dir"/*/* | "$dir"/. | "$dir"/..) ;;
+    "$dir"/?*) /bin/rm -f -- "\$arg" ;;
+  esac
+done
+SH
+  chmod 0755 "$stop/od" "$stop/mkdir" "$stop/rm"
+  local want_calls="mkdir -p /tmp/.X11-unix"
+
+  : >"$stop/calls"
+  : >"$TMP/notice-run.out"
+
+  env -i PATH="$stop_path" HOME=/home/desktop DESKTOP_NOTICE='Hej då, "scout"' \
+    DESKTOP_NOTICE_FILE="$file" bash "$ENTRYPOINT" >/dev/null 2>"$TMP/notice-run.err"
+  rc=$?
+  if [ "$rc" = 97 ] && [ "$(cat "$stop/calls")" = "$want_calls" ] && python3 -I -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+if data != {"text": "Hej då, \"scout\""}:
+    sys.exit("content is %r" % (data,))
+' "$file" >"$TMP/notice-run.out" 2>&1 &&
+    [ "$(cat "$file")" = '{"text": "Hej då, \"scout\""}' ] &&
+    [ "$(stat -c %a "$file")" = 644 ]; then
+    pass notice-file-written
+  else
+    fail notice-file-written "exit $rc, calls '$(tr '\n' ';' <"$stop/calls")': $(tr '\n' '|' <"$TMP/notice-run.out") $(tr '\n' '|' <"$TMP/notice-run.err")"
+  fi
+
+  # A start with another notice replaces the file by a rename (a new inode),
+  # never by rewriting it in place, and leaves no temp file next to it: the
+  # temp file exists before the rename unlinks the old one, so the inode
+  # always changes.
+  inode="$(stat -c %i "$file" 2>/dev/null)"
+  : >"$stop/calls"
+  env -i PATH="$stop_path" HOME=/home/desktop DESKTOP_NOTICE='second' \
+    DESKTOP_NOTICE_FILE="$file" bash "$ENTRYPOINT" >/dev/null 2>&1
+  rc=$?
+  if [ "$rc" = 97 ] && [ "$(cat "$stop/calls")" = "$want_calls" ] && [ -n "$inode" ] && [ "$(stat -c %i "$file" 2>/dev/null)" != "$inode" ] &&
+    [ "$(cat "$file" 2>/dev/null)" = '{"text": "second"}' ] &&
+    [ "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
+    pass notice-file-replaced
+  else
+    fail notice-file-replaced "exit $rc, calls '$(tr '\n' ';' <"$stop/calls")', inode $inode -> $(stat -c %i "$file" 2>/dev/null), content '$(cat "$file" 2>/dev/null)', files: $(find "$dir" -mindepth 1 | tr '\n' ' ')"
+  fi
+
+  # Unset on the next start (the emptyDir survives a container restart): the
+  # file is written as {"text": ""} instead, so the page never gets a 404, and
+  # no temp file is left behind.
+  : >"$stop/calls"
+  env -i PATH="$stop_path" HOME=/home/desktop \
+    DESKTOP_NOTICE_FILE="$file" bash "$ENTRYPOINT" >/dev/null 2>"$TMP/notice-unset.err"
+  rc=$?
+  if [ "$rc" = 97 ] && [ "$(cat "$stop/calls")" = "$want_calls" ] && [ -f "$file" ] && [ "$(cat "$file")" = '{"text": ""}' ] &&
+    [ "$(stat -c %a "$file")" = 644 ] &&
+    [ "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
+    pass notice-file-cleared
+  else
+    fail notice-file-cleared "exit $rc, calls '$(tr '\n' ';' <"$stop/calls")', content '$(cat "$file" 2>/dev/null)', files: $(find "$dir" -mindepth 1 -maxdepth 1 -print | tr '\n' ' ')"
+  fi
+
+  # The emptyDir survives a restart, so the notice path may hold anything a
+  # desktop user left there. A symlink to a directory is replaced, never
+  # followed (plain mv -f would move the file into that directory and the page
+  # would get a 404); a directory is refused loudly instead of swallowing the
+  # file.
+  local elsewhere="$TMP/notice-elsewhere"
+  rm -f "$file"
+  mkdir -p "$elsewhere"
+  ln -s "$elsewhere" "$file"
+  env -i PATH="$stop_path" HOME=/home/desktop DESKTOP_NOTICE='third' \
+    DESKTOP_NOTICE_FILE="$file" bash "$ENTRYPOINT" >/dev/null 2>&1
+  rc=$?
+  if [ "$rc" = 97 ] && [ -f "$file" ] && [ ! -L "$file" ] &&
+    [ "$(cat "$file")" = '{"text": "third"}' ] &&
+    [ -z "$(find "$elsewhere" -mindepth 1 -print -quit)" ]; then
+    pass notice-file-symlink-replaced
+  else
+    fail notice-file-symlink-replaced "exit $rc, $(find "$dir" "$elsewhere" -printf '%p %y; ')"
+  fi
+  rm -f "$file"
+  mkdir "$file"
+  env -i PATH="$stop_path" HOME=/home/desktop DESKTOP_NOTICE='fourth' \
+    DESKTOP_NOTICE_FILE="$file" bash "$ENTRYPOINT" >/dev/null 2>"$TMP/notice-dir.err"
+  rc=$?
+  if [ "$rc" = 1 ] && grep -qF "cannot move the notice into $file" "$TMP/notice-dir.err" &&
+    [ -z "$(find "$file" -mindepth 1 -print -quit)" ] &&
+    [ "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
+    pass notice-file-dir-refused
+  else
+    fail notice-file-dir-refused "exit $rc, $(tr '\n' '|' <"$TMP/notice-dir.err") $(find "$dir" | tr '\n' ' ')"
+  fi
+  rm -rf "$file"
+
+  # Host mode writes no file, even with a notice set. A stand-in socket ends
+  # the wait for the host desktop at once, and a stub websockify that exits 97
+  # ends the run there. The timeout turns a bypassed stub (a noexec $TMP on a
+  # host that has websockify) into a failure instead of a hang.
+  local hdir="$TMP/notice-host" hsock="$TMP/notice-host.sock"
+  mkdir -p "$hdir"
+  printf '#!/bin/sh\nexit 97\n' >"$stop/websockify"
+  chmod 0755 "$stop/websockify"
+  python3 -I -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$hsock"
+  timeout 30 env -i PATH="$stop_path" HOME=/home/desktop DESKTOP_MODE=host DESKTOP_SOCKET="$hsock" \
+    DESKTOP_NOTICE='shared desktop' DESKTOP_NOTICE_FILE="$hdir/notice.json" \
+    bash "$ENTRYPOINT" >/dev/null 2>"$TMP/notice-host.err"
+  rc=$?
+  if [ "$rc" = 97 ] && [ -z "$(find "$hdir" -mindepth 1 -print -quit)" ]; then
+    pass notice-file-host-none
+  else
+    fail notice-file-host-none "exit $rc, files: $(find "$hdir" -mindepth 1 | tr '\n' ' ')"
+  fi
 }
 
 # --- browser wrapper --------------------------------------------------------
@@ -954,6 +1460,11 @@ assert(plain.get("autoconnect") === "1", "autoconnect default missing");
 assert(plain.get("reconnect") === "1", "reconnect default missing");
 assert(plain.get("resize") === "remote", "resize default missing");
 assert(plain.get("path") === "websockify", "path default missing");
+// The cache key: websockify sends no Cache-Control, so a browser may hold an
+// older vnc.html for a while. It has to be in the URL noVNC loads.
+// Which number is test_novnc_extra's job: it checks that the defaults, the
+// two static URLs and the Dockerfile script tag carry the same one.
+assert(/^[0-9]+$/.test(plain.get("v") || ""), "cache key missing: " + plain.get("v"));
 
 // A parameter the user came with is kept.
 const viewOnly = new URL(runTarget("?view_only=1"), "http://desktop/").searchParams;
@@ -979,6 +1490,507 @@ JS
     pass index-redirect
   else
     fail index-redirect "$(head -20 "$TMP/index.out" | tr '\n' '|')"
+  fi
+}
+
+# --- the notice banner script -----------------------------------------------
+
+# teknoir-notice.js runs in the real vnc.html, so it is checked here against a
+# minimal fake document and fetch: the notice becomes a banner of text (never
+# elements), nothing is logged, nothing leaks into the global scope, no HTML is
+# parsed and focus never moves, and any odd file means no banner at all.
+test_notice_script() {
+  if ! command -v node >/dev/null 2>&1; then
+    skip notice-script "node is not on PATH"
+    return
+  fi
+
+  if node - "$NOTICE_JS" >"$TMP/notice-script.out" 2>&1 <<'JS'
+const fs = require("fs");
+const vm = require("vm");
+
+const code = fs.readFileSync(process.argv[2], "utf8");
+
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+const failures = [];
+process.on("unhandledRejection", (reason) => {
+  failures.push("unhandled rejection: " + reason);
+});
+
+// Just enough DOM for the script: elements with children, attributes, style
+// and listeners, a head, and a body with the page's own elements already in
+// it. HTML writes are recorded and not performed, so an innerHTML call cannot
+// hide as a silent no-op, and focus() is recorded so a focus grab is visible.
+function makeDocument() {
+  const created = [];
+  const htmlWrites = [];
+  const focused = [];
+  function makeEl(tag) {
+    return {
+      set innerHTML(value) { htmlWrites.push(["innerHTML", value]); },
+      get innerHTML() { return ""; },
+      set outerHTML(value) { htmlWrites.push(["outerHTML", value]); },
+      insertAdjacentHTML(where, value) { htmlWrites.push(["insertAdjacentHTML", where, value]); },
+      focus() { focused.push(this); },
+      get firstChild() { return this.children[0] || null; },
+      get lastChild() { return this.children[this.children.length - 1] || null; },
+      tagName: tag.toUpperCase(),
+      children: [],
+      style: { cssText: "" },
+      attributes: {},
+      id: "",
+      title: "",
+      textContent: "",
+      parentNode: null,
+      listeners: {},
+      setAttribute(name, value) {
+        this.attributes[name] = String(value);
+      },
+      getAttribute(name) {
+        return this.attributes[name];
+      },
+      appendChild(child) {
+        child.parentNode = this;
+        this.children.push(child);
+        return child;
+      },
+      insertBefore(child, ref) {
+        child.parentNode = this;
+        const at = this.children.indexOf(ref);
+        if (at < 0) {
+          this.children.push(child);
+        } else {
+          this.children.splice(at, 0, child);
+        }
+        return child;
+      },
+      removeChild(child) {
+        const at = this.children.indexOf(child);
+        if (at >= 0) {
+          this.children.splice(at, 1);
+        }
+        child.parentNode = null;
+        return child;
+      },
+      addEventListener(type, fn) {
+        (this.listeners[type] = this.listeners[type] || []).push(fn);
+      },
+      dispatch(type, event) {
+        (this.listeners[type] || []).forEach((fn) => fn(event));
+      },
+      click() {
+        (this.listeners.click || []).forEach((fn) => fn({}));
+      },
+    };
+  }
+
+  const head = makeEl("head");
+  const body = makeEl("body");
+  body.appendChild(makeEl("div")); // the page's own UI
+
+  function find(el, id) {
+    if (el.id === id) {
+      return el;
+    }
+    for (const child of el.children) {
+      const hit = find(child, id);
+      if (hit) {
+        return hit;
+      }
+    }
+    return null;
+  }
+
+  return {
+    head,
+    body,
+    created,
+    htmlWrites,
+    focused,
+    write(value) { htmlWrites.push(["write", value]); },
+    writeln(value) { htmlWrites.push(["writeln", value]); },
+    createElement(tag) {
+      const el = makeEl(tag);
+      created.push(el);
+      return el;
+    },
+    getElementById(id) {
+      return find(body, id);
+    },
+  };
+}
+
+// The script must not need anything beyond document, fetch and console: a
+// missing global would show up as an error, not as a passed test.
+function run(fetchImpl) {
+  const doc = makeDocument();
+  const logs = [];
+  const spy = {
+    log(...args) { logs.push(["log", ...args]); },
+    info(...args) { logs.push(["info", ...args]); },
+    warn(...args) { logs.push(["warn", ...args]); },
+    error(...args) { logs.push(["error", ...args]); },
+    debug(...args) { logs.push(["debug", ...args]); },
+  };
+  // The page runs the banner insert inside an animation frame (see below);
+  // there is no frame loop here, so the callback runs as soon as it is
+  // queued.
+  const context = vm.createContext({
+    document: doc,
+    fetch: fetchImpl,
+    console: spy,
+    requestAnimationFrame: (fn) => {
+      fn();
+      return 0;
+    },
+  });
+  const before = Object.keys(context).sort().join(",");
+  vm.runInContext(code, context, { timeout: 2000 });
+  const after = Object.keys(context).sort().join(",");
+  assert(before === after, "the script leaked a global: " + after);
+  return { doc, logs };
+}
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
+const json = (value) => () => Promise.resolve(value);
+
+(async function () {
+  // A 200 with text: one banner, the text as text, at the top of the body,
+  // with a style that makes room for it and a close button that is an ASCII
+  // escape.
+  {
+    let seen = null;
+    const { doc, logs } = run((url, options) => {
+      seen = { url, options };
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: json({ text: "<img src=x onerror=alert(1)>" }),
+      });
+    });
+    await tick();
+
+    assert(seen, "fetch was not called");
+    assert(seen.url === "teknoir-notice.json", "fetched '" + seen.url + "'");
+    assert(seen.options.cache === "no-store", "cache is not no-store");
+    assert(seen.options.credentials === "same-origin", "credentials is not same-origin");
+
+    const banner = doc.getElementById("teknoir_notice");
+    assert(banner, "no banner for a 200 with text");
+    assert(doc.body.children[0] === banner, "the banner is not the first child of body");
+    assert(banner.getAttribute("role") === "status", "role is not status");
+    assert(banner.title === "<img src=x onerror=alert(1)>", "title is not the notice");
+
+    const label = doc.getElementById("teknoir_notice_text");
+    assert(label, "the banner has no text element");
+    assert(label.textContent === "<img src=x onerror=alert(1)>",
+      "textContent is '" + label.textContent + "'");
+    assert(!doc.created.some((el) => el.tagName === "IMG"),
+      "an element was created from the markup");
+    assert(doc.created.length === 4, doc.created.length + " elements created, want 4");
+
+    // The banner is fixed and 24px high, so the page has to make room for it:
+    // one <style> in <head> moves noVNC's container and status line down 24px
+    // and shortens the container by the same 24px.
+    const rooms = doc.head.children.filter((el) => el.tagName === "STYLE");
+    assert(rooms.length === 1, rooms.length + " styles in head, want 1");
+    // Compared exactly, spaces included: calc() needs the spaces around "-"
+    // (the browser drops calc(100%-24px) as invalid, and the container keeps
+    // its full height under the banner), and a later rule could undo a move.
+    const room = rooms[0].textContent;
+    assert(room === "#noVNC_container{position:relative;top:24px;height:calc(100% - 24px)}" +
+      "#noVNC_status{top:24px}",
+      "the style that makes room for the banner is '" + room + "'");
+    assert(/(^|;)height:24px;/.test(banner.style.cssText) &&
+      /(^|;)line-height:24px(;|$)/.test(banner.style.cssText),
+      "the banner is not 24px high, the room the style makes: " + banner.style.cssText);
+    // The bar and the room the style makes must be the same number, or the
+    // banner covers the remote screen (taller bar) or leaves a gap (taller
+    // room).
+    const barRoom = /(^|;)height:([0-9]+)px;/.exec(banner.style.cssText);
+    const pageRoom = /top:([0-9]+)px;height:calc\(100% - ([0-9]+)px\)/.exec(room);
+    assert(barRoom && pageRoom && barRoom[2] === pageRoom[1] &&
+      pageRoom[1] === pageRoom[2],
+      "the banner height and the room the style makes differ: " +
+        banner.style.cssText + " / " + rooms[0].textContent);
+
+    // Below noVNC's status line (100) and fatal-error box (1000): the status
+    // slides in over the banner, and a fatal error covers the whole page.
+    assert(banner.style.cssText.includes("z-index:99;"),
+      "the banner z-index is not 99: " + banner.style.cssText);
+    assert(!banner.style.cssText.includes("2147483647"),
+      "the banner uses the maximum z-index");
+
+    const close = doc.created.find((el) => el.tagName === "BUTTON");
+    assert(close, "no close button");
+    assert(close.getAttribute("aria-label") === "Hide notice", "the close button has no label");
+    assert(close.getAttribute("tabindex") === "-1", "the close button is in the tab order");
+    // noVNC's input.css gives every <button> min-width:8em (128 px), bold
+    // text and a 6 px radius: without the reset the x is a 128 px invisible
+    // hit area that also cuts the text. It is a 24x24 target, like the bar.
+    assert(/(^|;)min-width:0;/.test(close.style.cssText),
+      "the close button keeps noVNC's button min-width: " + close.style.cssText);
+    assert(/(^|;)width:24px;/.test(close.style.cssText) &&
+      /(^|;)height:24px;/.test(close.style.cssText) &&
+      /(^|;)font-weight:normal(;|$)/.test(close.style.cssText) &&
+      /(^|;)border-radius:0(;|$)/.test(close.style.cssText),
+      "the close button is not a 24x24 plain target: " + close.style.cssText);
+    // The escape, not the literal: the page and the script are served without
+    // a charset, so a raw byte would be mojibake. novnc-notice-ascii pins it.
+    assert(close.textContent === "\u00d7",
+      "the close button text is '" + close.textContent + "'");
+    assert(logs.length === 0, "the script logged: " + JSON.stringify(logs));
+    assert(doc.htmlWrites.length === 0, "HTML was written: " + JSON.stringify(doc.htmlWrites));
+    assert(doc.focused.length === 0, "the script moved the focus");
+
+    // A press anywhere on the banner (the x included) is cancelled, so the
+    // click never moves keyboard focus off the VNC canvas.
+    let prevented = 0;
+    const event = { preventDefault() { prevented += 1; } };
+    assert((banner.listeners.mousedown || []).length === 1,
+      (banner.listeners.mousedown || []).length + " mousedown listeners on the banner, want 1");
+    banner.dispatch("mousedown", event);
+    assert((close.listeners.mousedown || []).length === 1,
+      (close.listeners.mousedown || []).length + " mousedown listeners on the close button, want 1");
+    close.dispatch("mousedown", event);
+    assert(prevented === 2, "a mousedown on the banner would take focus from the VNC canvas");
+
+    close.click();
+    assert(!doc.getElementById("teknoir_notice"), "the close button did not hide the banner");
+    assert(!doc.body.children.includes(banner), "the banner is still in the page");
+    assert(doc.head.children.length === 0, "the room style is still in the page");
+    // Closing is a click on the page: it must not move keyboard focus off the
+    // canvas either, and nothing may take focus by itself.
+    assert(doc.focused.length === 0, "closing the banner moved the focus");
+    assert(!doc.created.some((el) => el.autofocus || "autofocus" in el.attributes),
+      "an element has autofocus");
+  }
+
+  // With requestAnimationFrame the banner is inserted inside a frame
+  // callback, not straight from the fetch: noVNC records its expected screen
+  // size in a frame callback queued earlier, which must run first. The room
+  // style is what shrinks noVNC's container, so it must wait for the frame
+  // too. A connect while the frame is still pending (a background tab runs
+  // no frames) must neither fetch again nor queue a second banner.
+  {
+    const frames = [];
+    const doc = makeDocument();
+    const classes = new Set();
+    let observer = null;
+    doc.documentElement = { classList: { contains: (c) => classes.has(c) } };
+    class FakeObserver {
+      constructor(fn) { this.fn = fn; observer = this; }
+      observe() {}
+    }
+    let fetches = 0;
+    const context = vm.createContext({
+      document: doc,
+      fetch: () => {
+        fetches += 1;
+        return Promise.resolve({ ok: true, status: 200, json: json({ text: "shared" }) });
+      },
+      console: {},
+      MutationObserver: FakeObserver,
+      requestAnimationFrame: (fn) => { frames.push(fn); return frames.length; },
+    });
+    vm.runInContext(code, context, { timeout: 2000 });
+    await tick();
+    assert(!doc.getElementById("teknoir_notice"), "the banner was inserted outside an animation frame");
+    assert(doc.head.children.length === 0 && doc.created.length === 0,
+      "the banner or its room style was built outside an animation frame");
+    assert(frames.length === 1, frames.length + " frame callbacks queued, want 1");
+    classes.add("noVNC_connected");
+    observer.fn([]);
+    await tick();
+    assert(fetches === 1 && frames.length === 1,
+      "a connect while the frame was pending fetched " + fetches + " times and queued " +
+        frames.length + " frames, want 1 and 1");
+    frames.shift()();
+    assert(doc.body.children.filter((el) => el.id === "teknoir_notice").length === 1 &&
+      doc.head.children.length === 1,
+      "the frame callback did not insert exactly one banner and one style");
+  }
+
+  // A browser without requestAnimationFrame gets the banner straight away: the
+  // fallback must insert it, not drop it.
+  {
+    const doc = makeDocument();
+    const context = vm.createContext({
+      document: doc,
+      fetch: () => Promise.resolve({ ok: true, status: 200, json: json({ text: "shared" }) }),
+      console: {},
+    });
+    vm.runInContext(code, context, { timeout: 2000 });
+    await tick();
+    assert(doc.getElementById("teknoir_notice"), "no banner without requestAnimationFrame");
+  }
+
+  // Two fetches can answer before the frame that inserts the banner (the
+  // first one is still pending when noVNC connects). The banner is decided
+  // before that frame, so there is still one banner and one style.
+  {
+    const frames = [];
+    const doc = makeDocument();
+    const classes = new Set();
+    doc.documentElement = { classList: { contains: (c) => classes.has(c) } };
+    let observer = null;
+    class FakeObserver {
+      constructor(fn) { this.fn = fn; observer = this; }
+      observe() {}
+    }
+    const answers = [];
+    const context = vm.createContext({
+      document: doc,
+      fetch: () => new Promise((resolve) => answers.push(resolve)),
+      console: {},
+      MutationObserver: FakeObserver,
+      requestAnimationFrame: (fn) => { frames.push(fn); return frames.length; },
+    });
+    vm.runInContext(code, context, { timeout: 2000 });
+    classes.add("noVNC_connected");
+    observer.fn([]);
+    assert(answers.length === 2, answers.length + " fetches before the first answer, want 2");
+    answers.forEach((resolve) => resolve({ ok: true, status: 200, json: json({ text: "shared" }) }));
+    await tick();
+    frames.splice(0).forEach((fn) => fn());
+    const banners = doc.body.children.filter((el) => el.id === "teknoir_notice");
+    assert(banners.length === 1 && doc.head.children.length === 1,
+      banners.length + " banners and " + doc.head.children.length +
+        " styles for two answers in one frame, want 1 and 1");
+  }
+
+  // Anything wrong means no banner, no elements and nothing logged.
+  const broken = [
+    ["404", () => Promise.resolve({ ok: false, status: 404, json: json({ text: "not for a 404" }) })],
+    ["500", () => Promise.resolve({ ok: false, status: 500, json: json({ text: "not for a 500" }) })],
+    ["a network error", () => Promise.reject(new Error("offline"))],
+    ["invalid JSON", () => Promise.resolve({ ok: true, status: 200, json: () => Promise.reject(new SyntaxError("bad")) })],
+    ["a number as text", () => Promise.resolve({ ok: true, status: 200, json: json({ text: 5 }) })],
+    ["blank text", () => Promise.resolve({ ok: true, status: 200, json: json({ text: "   " }) })],
+    ["no text", () => Promise.resolve({ ok: true, status: 200, json: json({}) })],
+    ["JSON null", () => Promise.resolve({ ok: true, status: 200, json: json(null) })],
+  ];
+  for (const [name, impl] of broken) {
+    const { doc, logs } = run(impl);
+    await tick();
+    assert(!doc.getElementById("teknoir_notice"), "a banner appeared for " + name);
+    assert(doc.created.length === 0, "an element was created for " + name);
+    assert(logs.length === 0, "the script logged for " + name + ": " + JSON.stringify(logs));
+    assert(doc.htmlWrites.length === 0, "HTML was written for " + name);
+  }
+
+  // A failed fetch is tried again whenever noVNC connects (the class
+  // noVNC_connected appears on <html>), until a banner has been shown.
+  function runObserved(responses) {
+    const doc = makeDocument();
+    const classes = new Set();
+    let observer = null;
+    doc.documentElement = {
+      classList: { contains: (c) => classes.has(c) },
+    };
+    class FakeObserver {
+      constructor(fn) { this.fn = fn; observer = this; }
+      observe(target, options) { this.target = target; this.options = options; }
+    }
+    const calls = [];
+    const fetchImpl = (url) => {
+      calls.push(url);
+      return responses.length ? responses.shift()() : Promise.reject(new Error("no more"));
+    };
+    const logs = [];
+    const spy = {
+      log(...args) { logs.push(["log", ...args]); },
+      info(...args) { logs.push(["info", ...args]); },
+      warn(...args) { logs.push(["warn", ...args]); },
+      error(...args) { logs.push(["error", ...args]); },
+      debug(...args) { logs.push(["debug", ...args]); },
+    };
+    const context = vm.createContext({
+      document: doc,
+      fetch: fetchImpl,
+      console: spy,
+      MutationObserver: FakeObserver,
+    });
+    vm.runInContext(code, context, { timeout: 2000 });
+    const set = (on) => {
+      if (on) {
+        classes.add("noVNC_connected");
+      } else {
+        classes.delete("noVNC_connected");
+      }
+      observer.fn([]);
+    };
+    return { doc, calls, logs, set, observer: () => observer };
+  }
+  const okText = (text) => () => Promise.resolve({ ok: true, status: 200, json: json({ text }) });
+  const status = (code) => () => Promise.resolve({ ok: false, status: code, json: json({}) });
+  {
+    const r = runObserved([status(503), okText("shared"), okText("again")]);
+    await tick();
+    assert(r.observer(), "no class observer");
+    // noVNC 1.7.0 sets noVNC_connected on <html> (app/ui.js updateVisualState):
+    // an observer on any other node would never fire.
+    assert(r.observer().target === r.doc.documentElement,
+      "the observer does not watch <html>, where noVNC sets noVNC_connected");
+    assert(r.observer().options.attributeFilter[0] === "class", "the observer watches something else");
+    assert(!r.doc.getElementById("teknoir_notice"), "a banner appeared for a 503");
+    r.set(true);
+    await tick();
+    assert(r.calls.length === 2, "connect after a 503 fetched " + r.calls.length + " times, want 2");
+    assert(r.doc.getElementById("teknoir_notice"), "no banner after the connect");
+    r.doc.created.find((el) => el.tagName === "BUTTON").click();
+    r.set(false);
+    r.set(true);
+    await tick();
+    assert(r.calls.length === 2, "a reconnect after a shown banner fetched again");
+    assert(!r.doc.getElementById("teknoir_notice"), "a closed banner came back on reconnect");
+    assert(r.logs.length === 0, "logged: " + JSON.stringify(r.logs));
+  }
+  {
+    // Class changes that are not a new connect do not fetch.
+    const r = runObserved([status(404), status(404), status(404)]);
+    await tick();
+    r.set(true);
+    await tick();
+    r.observer().fn([]);
+    await tick();
+    assert(r.calls.length === 2, "class churn while connected fetched " + r.calls.length + " times, want 2");
+    assert(!r.doc.getElementById("teknoir_notice"), "a banner appeared for a 404");
+    assert(r.logs.length === 0, "logged: " + JSON.stringify(r.logs));
+  }
+
+  // Top-level let/const/class are global names too, but not properties of the
+  // global object: a second run in the same context throws on them.
+  {
+    const context = vm.createContext({
+      document: makeDocument(),
+      fetch: () => new Promise(() => {}),
+      console: {},
+    });
+    vm.runInContext(code, context, { timeout: 2000 });
+    try {
+      vm.runInContext(code, context, { timeout: 2000 });
+    } catch (err) {
+      throw new Error("the script declares a top-level name: " + err.message);
+    }
+  }
+
+  assert(failures.length === 0, failures.join("; "));
+  console.log("ok");
+})().catch((err) => {
+  console.error(err.message);
+  process.exit(1);
+});
+JS
+  then
+    pass notice-script
+  else
+    fail notice-script "$(head -20 "$TMP/notice-script.out" | tr '\n' '|')"
   fi
 }
 
@@ -1277,6 +2289,9 @@ test_seccomp_profile
 test_novnc_extra
 test_dockerfile_dev_shm
 test_entrypoint_vectors
+test_notice
+test_notice_locale
+test_notice_file
 test_browser_wrapper
 test_browser_live
 test_desktop_entries
@@ -1284,6 +2299,7 @@ test_manifests
 test_host_unit
 test_host_session
 test_index_redirect
+test_notice_script
 test_healthcheck
 test_healthcheck_bad_http
 test_healthcheck_blacklisted
