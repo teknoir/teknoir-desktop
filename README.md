@@ -29,6 +29,8 @@ a browser view to the device's own desktop instead of running a second one.
 | `/vnc.html` | the noVNC client |
 | `/websockify` | the WebSocket the client connects to |
 | `/healthz` | static text `ok`, for a liveness probe (it does not check the VNC side) |
+| `/teknoir-notice.json` | the notice banner text (see [Notice banner](#notice-banner)); a symlink to `/run/desktop/notice.json`, `{"text": ""}` without a notice in virtual mode; 404 in host mode |
+| `/teknoir-notice.js` | the notice banner script, loaded by `vnc.html` (see [Notice banner](#notice-banner)) |
 | `desktop-healthcheck` | the readiness probe: completes an RFB 3.8 handshake on the VNC socket and checks `/vnc.html` |
 
 ## Environment variables
@@ -44,11 +46,13 @@ value.
 | `DESKTOP_LISTEN` | `0.0.0.0` | both | address websockify binds to |
 | `DESKTOP_SOCKET` | `virtual`: `/run/desktop/vnc.sock`<br>`host`: `/run/teknoir-desktop/vnc.sock` | both | the VNC unix socket |
 | `DESKTOP_IDLE_TIMEOUT` | `0` | both | websockify `--idle-timeout` in seconds; 0 = never exit when idle |
-| `DESKTOP_DRY_RUN` | `0` | both | `1` prints the commands it would run (`RUN: …`), starts nothing, exits 0 |
+| `DESKTOP_DRY_RUN` | `0` | both | `1` prints the commands it would run (`RUN: …`), starts nothing, exits 0; in virtual mode with a notice it also prints one `notice: <JSON>` line after the `RUN:` lines |
 | `DESKTOP_GEOMETRY` | `1280x800` | virtual | screen size, `WIDTHxHEIGHT` |
 | `DESKTOP_DEPTH` | `24` | virtual | colour depth: 16, 24 or 32 |
 | `DESKTOP_DISPLAY` | `:1` | virtual | X display number |
 | `DESKTOP_CLIPBOARD` | `both` | virtual | `both`, `to-desktop`, `from-desktop` or `off` |
+| `DESKTOP_NOTICE` | *(empty)* | virtual | the shared-desktop banner: at most 300 characters, no control characters, valid UTF-8, leading and trailing whitespace (spaces, tabs, newlines) trimmed before the checks (a value over 4096 bytes is refused untrimmed); empty = no banner (see [Notice banner](#notice-banner)) |
+| `DESKTOP_NOTICE_FILE` | `/run/desktop/notice.json` | virtual | where the entrypoint writes the banner text. **Test only**: the page always reads `/run/desktop/notice.json` through a fixed symlink, so any other value hides the notice from the page (a 404, or a stale file from an earlier start) |
 | `DESKTOP_BROWSER` | `true` | virtual | start Chromium from the XFCE autostart; `false` leaves the desktop without a browser (the user can still open one from the application menu) |
 | `DESKTOP_BROWSER_URL` | `about:blank` | virtual | the page Chromium opens |
 | `DESKTOP_BROWSER_FLAGS` | *(empty)* | virtual | extra Chromium flags, split on spaces; never add `--no-sandbox` here (see [Browser sandbox](#browser-sandbox)) |
@@ -91,6 +95,80 @@ Node requirements: unprivileged user namespaces enabled
 `user.max_user_namespaces` > 0), and on Ubuntu 23.10+/24.04 nodes either
 `kernel.apparmor_restrict_unprivileged_userns=0` or an AppArmor rule that
 allows the user namespace.
+
+## Clipboard
+
+`DESKTOP_CLIPBOARD` decides which clipboard directions the VNC server allows:
+browser to desktop (`to-desktop`, Xvnc `-AcceptCutText`) and desktop to
+browser (`from-desktop`, `-SendCutText`); `both` allows both, `off` neither.
+The browser never reads the local clipboard by itself: text reaches the desktop
+only when the user puts it in noVNC's clipboard panel, and text copied inside
+the desktop appears in that panel rather than on the local clipboard (noVNC
+1.7.0 `app/ui.js`). Nothing is pasted by a page or by a window becoming
+active, so a bot desktop should normally run with `DESKTOP_CLIPBOARD=both`:
+pasting is already an explicit action in the panel, and there is nothing to
+protect by turning either direction off.
+
+## Notice banner
+
+A TeknoirBot's desktop (virtual mode) is shared with its whole teamspace, so
+whoever opens it must see that it is not their own computer.
+`DESKTOP_NOTICE` puts a thin amber banner at the top of the noVNC page, above
+the remote screen and noVNC's controls, and the banner is what the platform's
+TeknoirBot controller passes for its bot:
+
+```yaml
+env:
+  - name: DESKTOP_NOTICE
+    value: "This is the computer of TeknoirBot scout, shared with teamspace teknoir-demo. Don't sign in to Teknoir or personal accounts here, and don't run tnctl login."
+```
+
+- One line of at most 300 characters, counted as characters (`å`, `ä` and `ö`
+  cost one each). Text that is not valid UTF-8 is refused with exit 64, and so
+  is a control character inside it (a tab, a newline, C1 controls such as
+  U+0085, and U+2028/U+2029); only ASCII whitespace at either end is trimmed
+  first, such as the newline a YAML block scalar adds, and a notice that is
+  empty after trimming counts as unset. A value longer than 4096 bytes is not
+  trimmed and is refused (exit 64), even when it is only whitespace: trimming
+  in bash takes quadratic time. The rules are the same in every locale.
+- The text is shown literally (`<b>` is text, not markup), the full text is in
+  the tooltip when it does not fit, and the `×` closes the banner for that page
+  load only.
+- The banner takes its space from the page rather than covering it: noVNC's
+  container and status line move down 24 px and the remote desktop is 24 px
+  shorter while the banner shows, and it gets its full height back after `×`.
+  A click anywhere on the banner (the `×` included) does not move keyboard
+  focus, which stays on the VNC canvas.
+- noVNC's status line (Connecting, Disconnected, connection errors) moves down
+  with the page and opens just below the banner, so the banner and the
+  connection feedback are both readable. The banner's z-index is 99, below
+  noVNC's status line (100) and its fatal-error box (1000): the status slides
+  in over it, and only the fatal-error box covers it.
+- The entrypoint writes it to `/run/desktop/notice.json` before websockify
+  starts, and writes `{"text": ""}` when the variable is unset or empty after
+  trimming, which also replaces a notice from an earlier start: `/run/desktop`
+  is an `emptyDir` that survives a container restart, and the page fetches the
+  file on every load, so a missing file would be a 404 in the browser console.
+  Only host mode has no file, so only there does the page get a 404. A desktop
+  user can leave something at that path in the `emptyDir`: a symlink (to a
+  file or a directory) is replaced by the notice file without being followed,
+  and a directory stops the start (exit 1, `cannot move the notice into
+  /run/desktop/notice.json`) instead of starting without a banner.
+- Opening the desktop again while the pod is down (a link, the Backstage
+  button or a new tab; a reload revalidates the page and shows the error) can
+  serve `vnc.html` from the browser cache, because websockify sends no
+  `Cache-Control`, and once the desktop is back noVNC connects without a page
+  load (its own reconnect, or the Connect button). The script therefore
+  fetches the notice again on each new connect, until one has been shown, so
+  a desktop that came back gets its banner.
+- Host mode ignores it and logs one line saying so: the host desktop is the
+  device's own session, not a shared bot desktop.
+- At build time the Dockerfile copies `rootfs/opt/novnc-extra/teknoir-notice.js`
+  into the noVNC tree as `/opt/novnc/teknoir-notice.js`, adds its `<script>`
+  tag to `vnc.html`, and symlinks `/opt/novnc/teknoir-notice.json` to
+  `/run/desktop/notice.json` for websockify to serve. Only that one file is
+  linked: the rest of `/run/desktop` (Xauthority, `vnc.sock`) stays unreachable
+  from the page.
 
 ## Security model
 
@@ -227,10 +305,12 @@ The test suite needs no docker and no root. It runs `shellcheck -x` over every
 script, `hadolint` over the Dockerfile, validates the Chromium policy JSON and
 the xfconf XML, compares the entrypoint's `DESKTOP_DRY_RUN=1` output against the
 vectors in `test/vectors/` (the defaults of both modes, overrides, and the
-validation errors with their exit codes), runs `desktop-browser` with stub
+validation errors with their exit codes), checks the `DESKTOP_NOTICE` rules and
+the `notice.json` file it writes, runs `desktop-browser` with stub
 `chromium`/`unshare`/`pgrep` binaries to check the argv it gets and when its
-Singleton files are removed, checks the `index.html` redirect logic with
-`node`, and runs `desktop-healthcheck` against a stand-in RFB server and a
+Singleton files are removed, checks the `index.html` redirect logic and
+`teknoir-notice.js` against a stand-in page with `node`, and runs
+`desktop-healthcheck` against a stand-in RFB server and a
 stand-in web server, including a server that refuses the connection the way a
 blacklisted Xvnc does.
 

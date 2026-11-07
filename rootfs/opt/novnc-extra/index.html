@@ -10,7 +10,13 @@
   except the connection target: host, port, encrypt and path are dropped so a
   link cannot point this client at another server (mandatory.json pins them
   again inside noVNC). The defaults below only fill in what is missing, so
-  ?view_only=1 or ?resize=scale still work.
+  ?view_only=1 or ?resize=scale still work. "v" is a cache key: websockify
+  sends no Cache-Control, so a browser may keep an older vnc.html for a while,
+  and bumping v changes the URL it is cached under. The Dockerfile loads the
+  banner script as teknoir-notice.js?v=<the same number>, so bump v here, in
+  the two static URLs below and in the Dockerfile's script tag together
+  (test_novnc_extra checks they match) whenever a build changes vnc.html or
+  teknoir-notice.js.
 -->
 <script>
 (function () {
@@ -20,7 +26,8 @@
     "reconnect_delay": "2000",
     "resize": "remote",
     "path": "websockify",
-    "show_dot": "1"
+    "show_dot": "1",
+    "v": "2"
   };
   var params = new URLSearchParams(window.location.search || "");
   ["host", "port", "encrypt", "path"].forEach(function (k) {
@@ -35,10 +42,10 @@
   window.location.replace(target);
 })();
 </script>
-<meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=1&amp;reconnect=1&amp;reconnect_delay=2000&amp;resize=remote&amp;path=websockify&amp;show_dot=1">
+<meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=1&amp;reconnect=1&amp;reconnect_delay=2000&amp;resize=remote&amp;path=websockify&amp;show_dot=1&amp;v=2">
 </head>
 <body>
 <p>Opening the Teknoir desktop&hellip;</p>
-<p><a href="vnc.html?autoconnect=1&amp;reconnect=1&amp;reconnect_delay=2000&amp;resize=remote&amp;path=websockify&amp;show_dot=1">Continue</a></p>
+<p><a href="vnc.html?autoconnect=1&amp;reconnect=1&amp;reconnect_delay=2000&amp;resize=remote&amp;path=websockify&amp;show_dot=1&amp;v=2">Continue</a></p>
 </body>
 </html>
