@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+#
+# teknoir-desktop entrypoint.
+#
+# DESKTOP_MODE=virtual
+#   The container is the whole desktop: Xvnc (unix socket only) runs an XFCE
+#   session, and websockify serves the noVNC client on DESKTOP_PORT and
+#   bridges its WebSocket to that socket. Chromium is started by the XFCE
+#   autostart (/usr/local/bin/desktop-browser), not by this script: closing the
+#   browser is a normal user action and never stops the desktop.
+#
+# DESKTOP_MODE=host
+#   The container only serves noVNC + websockify and bridges to a VNC unix
+#   socket that a systemd unit on the HOST created (see host/ in this repo),
+#   mounted in through a hostPath volume.
+#
+# In both modes the VNC unix socket is the only way in for the pod. In virtual
+# mode the X display additionally needs its own MIT-MAGIC-COOKIE
+# (/run/desktop/Xauthority): without it any local client that can reach the X
+# socket could read the screen and type into the session.
+#
+# Everything is configured through environment variables; see README.md.
+# Every log line starts with "desktop-entrypoint: ".
+set -euo pipefail
+
+PROG=desktop-entrypoint
+
+log() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 64; }
+
+# --- validation -------------------------------------------------------------
+
+MODE="${DESKTOP_MODE:-virtual}"
+case "$MODE" in
+  virtual | host) ;;
+  *) die "unknown DESKTOP_MODE '${MODE}' (virtual|host)" ;;
+esac
+
+PORT_RAW="${DESKTOP_PORT:-6080}"
+[[ "$PORT_RAW" =~ ^[0-9]+$ ]] || die "invalid DESKTOP_PORT '${PORT_RAW}' (1024..65535)"
+port=$((10#$PORT_RAW))
+if ((port < 1024 || port > 65535)); then
+  die "invalid DESKTOP_PORT '${PORT_RAW}' (1024..65535)"
+fi
+
+LISTEN="${DESKTOP_LISTEN:-0.0.0.0}"
+
+IDLE_TIMEOUT="${DESKTOP_IDLE_TIMEOUT:-0}"
+[[ "$IDLE_TIMEOUT" =~ ^[0-9]+$ ]] || die "invalid DESKTOP_IDLE_TIMEOUT '${IDLE_TIMEOUT}' (seconds, 0 = never)"
+
+DRY_RUN="${DESKTOP_DRY_RUN:-0}"
+case "$DRY_RUN" in
+  0 | 1) ;;
+  *) die "invalid DESKTOP_DRY_RUN '${DRY_RUN}' (0|1)" ;;
+esac
+
+if [ "$MODE" = virtual ]; then
+  SOCKET="${DESKTOP_SOCKET:-/run/desktop/vnc.sock}"
+
+  GEOMETRY="${DESKTOP_GEOMETRY:-1280x800}"
+  [[ "$GEOMETRY" =~ ^[0-9]{3,4}x[0-9]{3,4}$ ]] || die "invalid DESKTOP_GEOMETRY '${GEOMETRY}' (WIDTHxHEIGHT)"
+
+  DEPTH="${DESKTOP_DEPTH:-24}"
+  case "$DEPTH" in
+    16 | 24 | 32) ;;
+    *) die "invalid DESKTOP_DEPTH '${DEPTH}' (16|24|32)" ;;
+  esac
+
+  DISPLAY_NUM="${DESKTOP_DISPLAY:-:1}"
+  [[ "$DISPLAY_NUM" =~ ^:[0-9]{1,2}$ ]] || die "invalid DESKTOP_DISPLAY '${DISPLAY_NUM}' (:N)"
+
+  CLIPBOARD="${DESKTOP_CLIPBOARD:-both}"
+  case "$CLIPBOARD" in
+    both) accept_cut=1; send_cut=1 ;;
+    to-desktop) accept_cut=1; send_cut=0 ;;
+    from-desktop) accept_cut=0; send_cut=1 ;;
+    off) accept_cut=0; send_cut=0 ;;
+    *) die "invalid DESKTOP_CLIPBOARD '${CLIPBOARD}' (both|to-desktop|from-desktop|off)" ;;
+  esac
+
+  BROWSER="${DESKTOP_BROWSER:-true}"
+  case "$BROWSER" in
+    true | false) ;;
+    *) die "invalid DESKTOP_BROWSER '${BROWSER}' (true|false)" ;;
+  esac
+  BROWSER_URL="${DESKTOP_BROWSER_URL:-about:blank}"
+  BROWSER_FLAGS="${DESKTOP_BROWSER_FLAGS:-}"
+  BROWSER_SANDBOX="${DESKTOP_BROWSER_SANDBOX:-auto}"
+  case "$BROWSER_SANDBOX" in
+    auto | on | off) ;;
+    *) die "invalid DESKTOP_BROWSER_SANDBOX '${BROWSER_SANDBOX}' (auto|on|off)" ;;
+  esac
+
+  # The XFCE session, and the browser autostart it runs, must see the values
+  # validated here.
+  export DESKTOP_BROWSER="$BROWSER" \
+    DESKTOP_BROWSER_URL="$BROWSER_URL" \
+    DESKTOP_BROWSER_FLAGS="$BROWSER_FLAGS" \
+    DESKTOP_BROWSER_SANDBOX="$BROWSER_SANDBOX"
+
+  # The cookie file lives in /run/desktop, never under $HOME (the home
+  # directory is a persistent volume). In the pod /run/desktop is an emptyDir,
+  # which kubelet creates world-writable (root:<fsGroup> 2777, no sticky bit),
+  # so the directory protects nothing: the cookie (and vnc.sock) are private
+  # only because they are created 0600 under umask 077 and only uid 1000 runs
+  # in the pod. A second container with another uid must not share the `run`
+  # volume.
+  XAUTH=/run/desktop/Xauthority
+else
+  SOCKET="${DESKTOP_SOCKET:-/run/teknoir-desktop/vnc.sock}"
+fi
+
+# --- the commands this container runs ---------------------------------------
+
+websockify_cmd=(
+  websockify
+  --web /opt/novnc
+  --file-only
+  --heartbeat 30
+  --idle-timeout "$IDLE_TIMEOUT"
+  --unix-target "$SOCKET"
+  "${LISTEN}:${port}"
+)
+
+# websockify 0.12 and 0.13 both treat --idle-timeout 0 as "never", so the
+# flag is always passed.
+
+if [ "$MODE" = virtual ]; then
+  xvnc_cmd=(
+    Xvnc "$DISPLAY_NUM"
+    -geometry "$GEOMETRY"
+    -depth "$DEPTH"
+    -nolisten tcp
+    -auth "$XAUTH"
+    -rfbport -1
+    -rfbunixpath "$SOCKET"
+    -rfbunixmode 0600
+    -SecurityTypes None
+    -AlwaysShared
+    # Every client of a unix socket has the same peer address (the socket
+    # path), so TigerVNC's per-address blacklist would lock out every client,
+    # noVNC included, after about five connections that fail to authenticate
+    # (the readiness probe used to be one). 0 disables it.
+    -BlacklistTimeout 0
+    -MaxCutText 262144
+    "-AcceptCutText=${accept_cut}"
+    "-SendCutText=${send_cut}"
+    -desktop TeknoirBot
+    # The readiness probe connects every 10 s and completes the handshake;
+    # TigerVNC logs several lines per connection (Connections, SConnection,
+    # VNCSConnST). Only errors still reach the container log.
+    -Log '*:stderr:30,Connections:stderr:0,VNCSConnST:stderr:0,SConnection:stderr:0,EncodeManager:stderr:0,ComparingUpdateTracker:stderr:0'
+  )
+
+  session_cmd=(
+    env "DISPLAY=${DISPLAY_NUM}" "XAUTHORITY=${XAUTH}"
+    dbus-launch --exit-with-session startxfce4
+  )
+fi
+
+# --- dry run ----------------------------------------------------------------
+
+# Print one line per command, each argument shell-quoted, then exit.
+dry_run_line() {
+  local line="RUN:"
+  local arg
+  for arg in "$@"; do
+    line+=" $(printf '%q' "$arg")"
+  done
+  printf '%s\n' "$line"
+}
+
+# The browser wrapper is a sibling of this script, which makes it both
+# /usr/local/bin/desktop-browser in the image and rootfs/usr/local/bin/... in
+# a checkout (the test suite runs it from the repository).
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ "$DRY_RUN" = 1 ]; then
+  if [ "$MODE" = virtual ]; then
+    dry_run_line "${xvnc_cmd[@]}"
+    dry_run_line "${session_cmd[@]}"
+    if [ "$BROWSER" = true ]; then
+      DESKTOP_DRY_RUN=1 "${SELF_DIR}/desktop-browser" --autostart
+    fi
+  fi
+  dry_run_line "${websockify_cmd[@]}"
+  exit 0
+fi
+
+# --- child supervision ------------------------------------------------------
+
+pids=()
+
+start_child() {
+  "$@" &
+  pids+=("$!")
+}
+
+# A child that has exited but not been reaped still answers kill -0, so ask
+# /proc whether it is a zombie instead of trusting the signal.
+is_running() {
+  local pid=$1 stat
+  [ -r "/proc/${pid}/stat" ] || return 1
+  read -r stat <"/proc/${pid}/stat" 2>/dev/null || return 1
+  stat=${stat##*') '}
+  [ "${stat%% *}" != Z ]
+}
+
+# TERM everything, wait up to five seconds, then KILL what is left and reap.
+stop_children() {
+  local pid remaining deadline
+  for pid in "${pids[@]}"; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  deadline=$((SECONDS + 5))
+  while ((SECONDS < deadline)); do
+    remaining=0
+    for pid in "${pids[@]}"; do
+      if is_running "$pid"; then
+        remaining=1
+      fi
+    done
+    if ((remaining == 0)); then
+      break
+    fi
+    sleep 0.2
+  done
+  for pid in "${pids[@]}"; do
+    if is_running "$pid"; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+  wait 2>/dev/null || true
+  return 0
+}
+
+# shellcheck disable=SC2317 # run from the TERM/INT trap
+on_term() {
+  log "received a termination signal, stopping children"
+  stop_children
+  exit 0
+}
+trap on_term TERM INT
+
+# --- start ------------------------------------------------------------------
+
+if [ "$MODE" = virtual ]; then
+  # The X server bind-mounts its own socket here. /tmp is usually a fresh
+  # emptyDir in this pod (see deploy/examples), so the directory has to exist
+  # and be writable by the desktop user before Xvnc starts.
+  mkdir -p /tmp/.X11-unix 2>/dev/null || true
+
+  # Without an auth file Xvnc falls back to host-based access control, which
+  # lets in every local client that can reach the X socket. Give the display a
+  # MIT-MAGIC-COOKIE of its own.
+  cookie="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  (umask 077 && rm -f "$XAUTH" && : >"$XAUTH" && xauth -q -f "$XAUTH" add "$DISPLAY_NUM" MIT-MAGIC-COOKIE-1 "$cookie")
+
+  # /tmp and /run/desktop are emptyDirs and survive a container restart: a
+  # killed Xvnc leaves its lock and socket behind, and the new Xvnc gets the
+  # same PID (4) in the fresh PID namespace, so it would refuse to start. Only
+  # this container uses this display.
+  n="${DISPLAY_NUM#:}"
+  rm -f "/tmp/.X${n}-lock" "/tmp/.X11-unix/X${n}" "$SOCKET"
+
+  log "starting Xvnc display ${DISPLAY_NUM} (${GEOMETRY}x${DEPTH}) on ${SOCKET}"
+  start_child "${xvnc_cmd[@]}"
+
+  # Wait up to 15 s for Xvnc to publish the unix socket, and stop waiting as
+  # soon as it has died.
+  waited=0
+  while [ ! -S "$SOCKET" ]; do
+    if ! is_running "${pids[0]}"; then
+      log "Xvnc exited before creating ${SOCKET}"
+      stop_children
+      exit 1
+    fi
+    if ((waited >= 150)); then
+      log "Xvnc did not create ${SOCKET}"
+      stop_children
+      exit 1
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  log "starting the XFCE session on display ${DISPLAY_NUM}"
+  start_child "${session_cmd[@]}"
+
+  # Chromium comes from the XFCE autostart (rootfs/etc/xdg/autostart/
+  # teknoir-browser.desktop -> desktop-browser), so it is not a child of this
+  # script: closing the browser does not stop the desktop, and the user can
+  # open a new one from the application menu.
+else
+  # The host socket may not exist yet (host reboot, unit restart). Wait up to
+  # 30 s, saying so once per 10 s, then serve anyway: websockify reports the
+  # failed connect per client and the readiness probe stays false.
+  waited=0
+  while [ ! -S "$SOCKET" ]; do
+    if ((waited >= 30)); then
+      log "host desktop socket ${SOCKET} still missing, starting websockify anyway"
+      break
+    fi
+    if ((waited % 10 == 0)); then
+      log "waiting for the host desktop socket ${SOCKET} (is teknoir-desktop.service running on the host?)"
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+fi
+
+log "starting websockify on ${LISTEN}:${port} -> ${SOCKET}"
+start_child "${websockify_cmd[@]}"
+
+# If Xvnc, the session or websockify exits, stop the rest and exit with its
+# status, so Kubernetes restarts the pod instead of leaving a half-dead
+# desktop.
+set +e
+wait -n
+status=$?
+set -e
+
+log "a child exited with status ${status}, stopping the rest"
+stop_children
+exit "$status"

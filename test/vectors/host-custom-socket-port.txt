@@ -1,0 +1,2 @@
+ENV: DESKTOP_DRY_RUN=1 DESKTOP_MODE=host DESKTOP_SOCKET=/run/x/vnc.sock DESKTOP_PORT=7000
+RUN: websockify --web /opt/novnc --file-only --heartbeat 30 --idle-timeout 0 --unix-target /run/x/vnc.sock 0.0.0.0:7000

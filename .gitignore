@@ -1,0 +1,12 @@
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Local build and test output
+/build/
+/dist/
+*.log
+test/tmp/

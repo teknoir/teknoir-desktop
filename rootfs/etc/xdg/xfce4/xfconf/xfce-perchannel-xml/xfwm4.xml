@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- Compositing off: no GPU, no GL, and a compositor over a 24-bit VNC
+     framebuffer only costs bandwidth. Two workspaces to match the stock
+     default without a workspace-clone surprise. -->
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="use_compositing" type="bool" value="false"/>
+    <property name="workspace_count" type="int" value="2"/>
+    <property name="scroll_workspaces" type="bool" value="true"/>
+    <property name="wrap_windows" type="bool" value="true"/>
+    <property name="snap_to_border" type="bool" value="true"/>
+    <property name="snap_to_windows" type="bool" value="true"/>
+  </property>
+</channel>

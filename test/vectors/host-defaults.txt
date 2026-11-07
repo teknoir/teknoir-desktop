@@ -1,0 +1,2 @@
+ENV: DESKTOP_DRY_RUN=1 DESKTOP_MODE=host
+RUN: websockify --web /opt/novnc --file-only --heartbeat 30 --idle-timeout 0 --unix-target /run/teknoir-desktop/vnc.sock 0.0.0.0:6080

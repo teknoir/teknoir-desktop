@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+#
+# teknoir-desktop readiness probe (Kubernetes exec probe).
+#
+# Exit 0 only if
+#   (a) the VNC unix socket completes an RFB 3.8 handshake: it greets with
+#       "RFB 003.008", offers the None security type and the SecurityResult is
+#       0, and
+#   (b) the noVNC client is served: http://127.0.0.1:<DESKTOP_PORT>/vnc.html is 200.
+# Otherwise print one line saying what failed and exit 1.
+#
+# The handshake is completed, not just greeting-checked: TigerVNC counts a
+# connection that does not authenticate against the peer address, and every
+# client of the unix socket has the same address, so greeting-only probes
+# would blacklist the socket (for everyone, noVNC included) after about five
+# connections. Xvnc also runs with -BlacklistTimeout 0; this is the other half.
+set -euo pipefail
+
+case "${DESKTOP_MODE:-virtual}" in
+  host) SOCKET="${DESKTOP_SOCKET:-/run/teknoir-desktop/vnc.sock}" ;;
+  *) SOCKET="${DESKTOP_SOCKET:-/run/desktop/vnc.sock}" ;;
+esac
+PORT="${DESKTOP_PORT:-6080}"
+
+# -I: isolated mode, so nothing in the working directory or the environment
+# can change what the probe does. Stdlib only (http.client, socket, struct).
+exec python3 -I -c '
+import http.client
+import socket
+import struct
+import sys
+
+socket_path, port = sys.argv[1], int(sys.argv[2])
+
+
+def fail(message):
+    print("desktop-healthcheck: " + message)
+    sys.exit(1)
+
+
+def recv_exact(sock, count):
+    """Return exactly count bytes from sock; raise on EOF."""
+    chunks = []
+    remaining = count
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise ValueError("connection closed after %d of %d bytes"
+                             % (count - remaining, count))
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def rfb_handshake(path):
+    """Complete the RFB 3.8 None handshake on the unix socket, or fail."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(3.0)
+    try:
+        sock.connect(path)
+        greeting = recv_exact(sock, 12)
+        if greeting != b"RFB 003.008\n":
+            fail("VNC socket %s: unexpected greeting %r (the server is "
+                 "refusing clients, or is not RFB 3.8)" % (path, greeting))
+        sock.sendall(b"RFB 003.008\n")
+        count = recv_exact(sock, 1)[0]
+        if count == 0:
+            (length,) = struct.unpack(">I", recv_exact(sock, 4))
+            reason = recv_exact(sock, length) if length else b""
+            fail("VNC socket %s: the server refused the connection: %s"
+                 % (path, reason.decode("utf-8", "replace")))
+        types = recv_exact(sock, count)
+        if 1 not in types:
+            fail("VNC socket %s: no None security type (offered %s)"
+                 % (path, ", ".join(str(t) for t in types)))
+        sock.sendall(b"\x01")
+        result = recv_exact(sock, 4)
+        if result != b"\x00\x00\x00\x00":
+            fail("VNC socket %s: SecurityResult %r (authentication failed)"
+                 % (path, result))
+    except Exception as exc:  # noqa: BLE001 - any failure is one line, exit 1
+        fail("VNC socket %s: %s" % (path, exc))
+    finally:
+        sock.close()
+
+
+def novnc_page(port_number):
+    """Return the HTTP status of /vnc.html, or fail."""
+    conn = http.client.HTTPConnection("127.0.0.1", port_number, timeout=3)
+    try:
+        conn.request("GET", "/vnc.html")
+        response = conn.getresponse()
+        response.read()
+    except Exception as exc:  # noqa: BLE001 - http.client.HTTPException too
+        fail("http://127.0.0.1:%d/vnc.html: %s" % (port_number, exc))
+    finally:
+        conn.close()
+    if response.status != 200:
+        fail("http://127.0.0.1:%d/vnc.html: HTTP %d"
+             % (port_number, response.status))
+
+
+rfb_handshake(socket_path)
+novnc_page(port)
+print("ok")
+' "$SOCKET" "$PORT"

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=light-locker (disabled)
+Comment=Disabled in teknoir-desktop: the desktop is watched remotely and must never lock or blank.
+Hidden=true
+X-GNOME-Autostart-enabled=false

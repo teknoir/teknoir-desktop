@@ -1,0 +1,23 @@
+# Build context for the teknoir-desktop image. The image only needs the
+# rootfs tree; everything else is documentation, tests or host-side files that
+# would only churn the build cache.
+
+.git
+.github
+.gitignore
+.dockerignore
+
+# Not part of the image
+test
+deploy
+host
+
+# Docs and metadata
+*.md
+catalog-info.yaml
+
+# Editor / OS noise
+.vscode
+.idea
+*.swp
+.DS_Store
