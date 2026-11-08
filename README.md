@@ -16,8 +16,9 @@ behind that on a unix socket, so nothing else listens on TCP.
 | `virtual` | the whole desktop: TigerVNC `Xvnc` as the X server (unix socket only), an XFCE session and Chromium | `/run/desktop/vnc.sock`, created by the container |
 | `host` | only noVNC + websockify, bridging to a desktop that already runs on the **host** | `/run/teknoir-desktop/vnc.sock`, created by a systemd unit on the host, mounted in with a `hostPath` volume |
 
-`virtual` is the computer of a TeknoirBot (an AI agent VM); a user watches it
-and takes it over in the browser. `host` is for edge devices: the container adds
+`virtual` is a desktop of its own in the container: the computer of a
+TeknoirBot, or a desktop on any device; a user watches it and takes it over in
+the browser. `host` is for edge devices: the container adds
 a browser view to the device's own desktop instead of running a second one.
 
 ## Ports and paths
@@ -114,8 +115,8 @@ protect by turning either direction off.
 A TeknoirBot's desktop (virtual mode) is shared with its whole teamspace, so
 whoever opens it must see that it is not their own computer.
 `DESKTOP_NOTICE` puts a thin amber banner at the top of the noVNC page, above
-the remote screen and noVNC's controls, and the banner is what the platform's
-TeknoirBot controller passes for its bot:
+the remote screen and noVNC's controls, and the banner is what device-controller
+passes for a TeknoirBot's computer:
 
 ```yaml
 env:
@@ -199,7 +200,9 @@ The only intended way in is the platform's **authenticated Tunneling proxy**
 (the `wgs-` host: login and access check at the hub), plus a **NetworkPolicy**
 that refuses ingress from every other pod (see `deploy/examples/`). The Service
 has no authentication of its own, so without that policy any pod on the device
-could open the desktop without logging in.
+could open the desktop without logging in. The policy does not stop the device's
+own host network: every local user and every hostNetwork pod on that node
+reaches 6080 as well.
 
 The container listens on `6080` **inside the pod network only**: the Service is
 `ClusterIP`, and there is no `NodePort`, no `LoadBalancer`, no `Ingress`.
@@ -207,8 +210,10 @@ The container listens on `6080` **inside the pod network only**: the Service is
 that port beyond the unix socket's permissions and the cookie; a forwarded port
 is a full remote desktop for anyone who can reach it.
 
-**Host mode hands the browser the device's own desktop session** of user
-`teknoir`, with everything that user can do on the device (comparable to SSH).
+**Host mode hands the browser the device's own desktop session** of the unit's
+user (`teknoir` by default; the ansible playbook's `desktop_user`), with
+everything that user can do on the device, including reading the device's own
+key in its home folder.
 **Virtual mode** is a restricted pod: non-root (uid/gid 1000 `desktop`, no sudo,
 no password), all capabilities dropped, no privilege escalation, the
 `teknoir-desktop` Localhost seccomp profile, and Chromium with its renderer
@@ -221,8 +226,9 @@ fallback to the `/tmp` `emptyDir`).
 ## Host mode: the systemd unit
 
 `host/` holds the **host side** of host mode. It is installed on a Teknoir
-device by an Ansible role (later work); this repository only documents it and
-installs nothing.
+device by the `desktop` playbook of teknoir/ansible (`playbooks/desktop.yml`,
+which vendors these two files); this repository only documents it and installs
+nothing.
 
 - `host/teknoir-desktop.service` — a systemd **system** unit, `User=teknoir`,
   `Group=teknoir-desktop`, `RuntimeDirectory=teknoir-desktop` (mode 0750,
@@ -289,8 +295,8 @@ pods; virtual mode's pod runs with the Localhost seccomp profile (see
 capabilities dropped, without a Service-account token (`automountServiceAccountToken:
 false`) and without Service links.
 
-These manifests are **documentation**. Another component (the TeknoirBot
-controller) renders the real ones, and deployments pin the image by digest
+These manifests are **documentation**. Another component (device-controller's
+Desktop feature) renders the real ones, and deployments pin the image by digest
 rather than the `:main` tag used in the examples.
 
 ## Build and test
