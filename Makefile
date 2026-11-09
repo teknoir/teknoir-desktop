@@ -36,10 +36,16 @@ image:
 
 # The agent image is amd64 only (three of the binaries it carries are), and
 # its kit comes from tnctl, so TNCTL_REF must name the cli commit that has
-# `tnctl agent install`.
+# `tnctl agent install`. It must be the full commit, not a branch or a tag:
+# the tnctl stage fetches exactly that name, and a moving name would keep the
+# first commit BuildKit cached, silently.
 image-agent:
 	@if [ -z "$(TNCTL_REF)" ]; then \
 	  echo "make image-agent: set TNCTL_REF to the teknoir/cli commit with 'tnctl agent install', e.g. make image-agent TNCTL_REF=<40-hex commit>" >&2; \
+	  exit 1; \
+	fi
+	@if ! printf '%s' "$(TNCTL_REF)" | grep -qxE '[0-9a-f]{40}'; then \
+	  echo "make image-agent: TNCTL_REF must be a full 40-character teknoir/cli commit" >&2; \
 	  exit 1; \
 	fi
 	docker buildx build --target agent --platform linux/amd64 \

@@ -30,6 +30,9 @@ WORK_DIR="${TEKNOIRBOT_WORK_DIR:-${HOME:-/home/desktop}/work}"
 CLAUDE="${TEKNOIRBOT_CLAUDE:-claude}"
 TNCTL="${TEKNOIRBOT_TNCTL:-tnctl}"
 CURL="${TEKNOIRBOT_CURL:-curl}"
+# The settings the terminal UI reads the bot's key through, in platform mode
+# only: not the managed settings, which also apply in own-account mode.
+PLATFORM_SETTINGS="${TEKNOIRBOT_PLATFORM_SETTINGS:-/usr/local/lib/teknoirbot/platform-settings.json}"
 
 # Set by the pod: the bot API's base URL (empty when this bot's computer was
 # made before the agent), and the domain for the prompt.
@@ -63,6 +66,18 @@ usage: teknoirbot-agent [--own-account]
 EOF
 }
 
+# A fatal error. The window is an xfce4-terminal (see the .desktop files),
+# which closes as soon as this script exits, so on a terminal that is still
+# the agent's the message would be gone before it could be read: wait for a
+# key press there. A run without a terminal (the tests) must not wait.
+die() {
+  printf '%s\n' "$*" >&2
+  if [ -t 0 ]; then
+    read -r -p 'Press Enter to close this window. ' _ || true
+  fi
+  exit "${DIE_RC:-1}"
+}
+
 # json_get PATH: the value at a jq PATH in BODY, on one line, and empty when
 # BODY is not JSON or the path is not there. Never fails the caller. A false
 # boolean is "false", not the empty string (jq's // treats false as absent).
@@ -77,9 +92,7 @@ json_get() {
 # outlive the child only for as long as the child runs.
 own_account() {
   if [ ! -d "$OWN_DIR" ] || [ ! -w "$OWN_DIR" ]; then
-    printf 'Own-account mode needs the memory volume %s, which this computer does not have.\n' \
-      "$OWN_DIR" >&2
-    exit 1
+    die "Own-account mode needs the memory volume $OWN_DIR, which this computer does not have."
   fi
   OWN_SESSION="$(mktemp -d "$OWN_DIR/s.XXXXXX")"
   chmod 0700 "$OWN_SESSION"
@@ -114,8 +127,8 @@ done
 # desktop user, no base URL, model or config directory from an earlier start.
 unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_MODEL CLAUDE_CONFIG_DIR
 export DISABLE_AUTOUPDATER=1
-mkdir -p "$WORK_DIR"
-cd "$WORK_DIR"
+mkdir -p "$WORK_DIR" || die "$PROG: cannot create the work directory $WORK_DIR"
+cd "$WORK_DIR" || die "$PROG: cannot enter the work directory $WORK_DIR"
 
 if [ "$OWN_ACCOUNT" = 1 ]; then
   own_account
@@ -135,10 +148,8 @@ if [ -d "$OWN_DIR" ] && [ -w "$OWN_DIR" ]; then
   HEADER_DIR="$(mktemp -d "$OWN_DIR/agent.XXXXXX")" || HEADER_DIR=""
 fi
 if [ -z "$HEADER_DIR" ]; then
-  HEADER_DIR="$(mktemp -d /dev/shm/teknoirbot-agent.XXXXXX)" || {
-    printf '%s: no writable directory for the model request header\n' "$PROG" >&2
-    exit 1
-  }
+  HEADER_DIR="$(mktemp -d /dev/shm/teknoirbot-agent.XXXXXX)" ||
+    die "$PROG: no writable directory for the model request header"
 fi
 HEADERS="$HEADER_DIR/headers"
 KEY="$(<"$KEY_FILE")"
@@ -149,6 +160,9 @@ KEY="${KEY%"${KEY##*[![:space:]]}"}"
   printf 'Authorization: Bearer %s\n' "$KEY" >"$HEADERS"
 )
 chmod 0600 "$HEADERS"
+# Not needed from here on: the request header file holds it, and the terminal
+# UI reads it from the key file itself through the apiKeyHelper.
+unset KEY
 
 # Who this bot is: the bot API's answer through tnctl, which runs in bot mode
 # here. A failure is not fatal: the agent starts with what the pod says, only
@@ -159,11 +173,20 @@ CREATOR=""
 ACCESS=""
 UNIT=""
 if WHOAMI="$("$TNCTL" whoami -o json 2>"$HEADER_DIR/whoami.err")"; then
-  NS="$(jq -r '.bot.namespace // ""' <<<"$WHOAMI" 2>/dev/null || true)"
-  NAME="$(jq -r '.bot.name // ""' <<<"$WHOAMI" 2>/dev/null || true)"
-  CREATOR="$(jq -r '.creator.email // ""' <<<"$WHOAMI" 2>/dev/null || true)"
-  ACCESS="$(jq -r '.bot.access // ""' <<<"$WHOAMI" 2>/dev/null || true)"
-  UNIT="$(jq -r '.bot.unit // ""' <<<"$WHOAMI" 2>/dev/null || true)"
+  # On its very first run, with an empty home, an older tnctl writes
+  # "Creating default configuration file at ..." to stdout before the JSON.
+  # Keep only the JSON, and treat anything that still is not JSON as no facts
+  # at all: a half-parsed answer is worse than none.
+  WHOAMI="$(sed -n '/^{/,$p' <<<"$WHOAMI")"
+  if jq -e . <<<"$WHOAMI" >/dev/null 2>&1; then
+    NS="$(jq -r '.bot.namespace // ""' <<<"$WHOAMI" 2>/dev/null || true)"
+    NAME="$(jq -r '.bot.name // ""' <<<"$WHOAMI" 2>/dev/null || true)"
+    CREATOR="$(jq -r '.creator.email // ""' <<<"$WHOAMI" 2>/dev/null || true)"
+    ACCESS="$(jq -r '.bot.access // ""' <<<"$WHOAMI" 2>/dev/null || true)"
+    UNIT="$(jq -r '.bot.unit // ""' <<<"$WHOAMI" 2>/dev/null || true)"
+  else
+    printf "tnctl whoami gave no JSON; starting without the bot's facts\n" >&2
+  fi
 else
   printf 'tnctl whoami failed: %s\n' "$(head -n 1 "$HEADER_DIR/whoami.err")" >&2
 fi
@@ -179,6 +202,13 @@ if [[ "$RESP" == *$'\n'* ]]; then
   HTTP="${RESP##*$'\n'}"
   BODY="${RESP%$'\n'*}"
 fi
+
+# The key is of no further use here (the terminal UI reads it through the
+# apiKeyHelper), and the answer "no, use my own account" must not leave it on
+# the memory volume for the whole session: the header file goes now, so the
+# cleanup below is only left for the paths that never get this far.
+rm -rf "$HEADER_DIR"
+HEADER_DIR=""
 
 MODEL=""
 REASON=""
@@ -208,13 +238,16 @@ if [ -z "$MODEL" ]; then
   esac
 fi
 
+# The key is deliberately not exported as ANTHROPIC_AUTH_TOKEN: every Bash
+# child, every hook and the MCP server would inherit it, and `jq -n env` (an
+# allowed command) would print it into the transcript. The terminal UI reads it
+# through the apiKeyHelper in $PLATFORM_SETTINGS instead, on every call.
 export ANTHROPIC_BASE_URL="$API/model"
-export ANTHROPIC_AUTH_TOKEN="$KEY"
 export ANTHROPIC_MODEL="$MODEL"
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
-# The request header has done its job (the token is in the environment now) and
-# the exec below would skip the EXIT trap: remove it here.
+# The exec below would skip the EXIT trap; the header file is already gone, and
+# this removes anything else the trap holds.
 cleanup
 
 # The system prompt addition: one line per fact the platform answered.
@@ -255,9 +288,9 @@ fi
 
 # Continue the conversation this directory already has, if it has one: the
 # terminal UI keeps its transcripts under the home volume, keyed by the
-# working directory with every "/" replaced by "-".
-PROJECTS="${HOME:-/home/desktop}/.claude/projects/${WORK_DIR//\//-}"
+# working directory with every character outside [a-zA-Z0-9] replaced by "-".
+PROJECTS="${HOME:-/home/desktop}/.claude/projects/${WORK_DIR//[^a-zA-Z0-9]/-}"
 if compgen -G "$PROJECTS/*.jsonl" >/dev/null; then
-  exec "$CLAUDE" --continue --append-system-prompt "$PROMPT"
+  exec "$CLAUDE" --settings "$PLATFORM_SETTINGS" --continue --append-system-prompt "$PROMPT"
 fi
-exec "$CLAUDE" --append-system-prompt "$PROMPT"
+exec "$CLAUDE" --settings "$PLATFORM_SETTINGS" --append-system-prompt "$PROMPT"

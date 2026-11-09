@@ -20,6 +20,15 @@
 # it needs the TNCTL_REF below, and that is the Makefile's job.
 
 ARG DEBIAN_IMAGE=docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+
+# The Go toolchain of the two build stages (tnctl and buildctl), shared so that
+# nothing new is pinned. It runs on the build host's architecture and
+# cross-compiles (CGO off, so no emulation is needed); the tnctl build is
+# always linux/amd64, because the agent image is. Declared here, before the
+# first FROM, because a FROM can only see the ARGs declared outside every
+# stage.
+ARG GO_IMAGE=docker.io/library/golang:1.26-alpine@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade
+
 FROM ${DEBIAN_IMAGE} AS desktop
 
 LABEL org.opencontainers.image.source="https://github.com/teknoir/teknoir-desktop" \
@@ -142,17 +151,13 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/desktop-entrypoint"]
 HEALTHCHECK NONE
 
 # tnctl, from a pinned commit of teknoir/cli, for the agent stage only. The Go
-# toolchain runs on the build host's architecture and cross-compiles (CGO off,
-# so no emulation is needed); the build is always linux/amd64, because the
-# agent image is.
+# image is the one at the top of this file.
 #
 # The default TNCTL_REF is `cli` main as of the agent image's first release,
 # which has no `tnctl agent install` yet: a build with the default therefore
 # fails at the agent kit step below. That is intended, and it is why `make
 # image-agent` refuses to run without TNCTL_REF. Pass the commit of the cli
 # branch that adds the agent kit.
-ARG GO_IMAGE=docker.io/library/golang:1.26-alpine@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade
-
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS tnctl
 
 ARG TNCTL_REPO=https://github.com/teknoir/cli.git
@@ -185,6 +190,24 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
       -ldflags "-s -w -X main.version=${TNCTL_VERSION}" \
       -o /out/tnctl .
+
+# buildctl, the client of the buildkitd that runs on the bot's own computer, at
+# the same version. It is unpacked in a stage of its own, so the release
+# tarball stays in that stage and the agent image gets only the client.
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS buildctl
+
+ARG BUILDKIT_VERSION=0.25.1
+ARG BUILDKIT_SHA256=85aa27c480fc9159705d21a3e66abe305f8dc708b8aeecd1e87bbc5c3de98642
+
+ADD https://github.com/moby/buildkit/releases/download/v${BUILDKIT_VERSION}/buildkit-v${BUILDKIT_VERSION}.linux-amd64.tar.gz /tmp/buildkit.tgz
+
+# DL4006 asks for pipefail before the pipe: this stage's shell is the Go
+# image's busybox ash, which has none, and the pipe's only producer is echo,
+# whose failure would make sha256sum fail on the missing line anyway.
+# hadolint ignore=DL4006
+RUN echo "${BUILDKIT_SHA256}  /tmp/buildkit.tgz" | sha256sum -c - \
+ && mkdir -p /out \
+ && tar -xzf /tmp/buildkit.tgz -C /out bin/buildctl
 
 # The agent image: the desktop above, plus the platform's AI agent for this
 # bot. An xfce4-terminal runs /usr/local/bin/teknoirbot-agent from the XFCE
@@ -227,10 +250,9 @@ RUN apt-get update \
 ARG CLAUDE_VERSION=2.1.319
 ARG CLAUDE_SHA256=dabafec82ca1319fa43d8be36a10fc61b1d11821cb98ad5df04ad95e199b8eed
 
-ADD https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/linux-x64/claude /opt/claude/${CLAUDE_VERSION}/claude
+ADD --chmod=0755 https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/linux-x64/claude /opt/claude/${CLAUDE_VERSION}/claude
 
 RUN echo "${CLAUDE_SHA256}  /opt/claude/${CLAUDE_VERSION}/claude" | sha256sum -c - \
- && chmod 0755 /opt/claude/${CLAUDE_VERSION}/claude \
  && ln -s /opt/claude/${CLAUDE_VERSION}/claude /usr/local/bin/claude
 
 # kubectl, to read this bot's own cluster (and to change it, which the managed
@@ -238,31 +260,26 @@ RUN echo "${CLAUDE_SHA256}  /opt/claude/${CLAUDE_VERSION}/claude" | sha256sum -c
 ARG KUBECTL_VERSION=1.34.13
 ARG KUBECTL_SHA256=b4bb494e9466a7a94bb851414548bc0d3e2f8da90757e6eccc3371e648648591
 
-ADD https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl /usr/local/bin/kubectl
+ADD --chmod=0755 https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl /usr/local/bin/kubectl
 
-RUN echo "${KUBECTL_SHA256}  /usr/local/bin/kubectl" | sha256sum -c - \
- && chmod 0755 /usr/local/bin/kubectl
+RUN echo "${KUBECTL_SHA256}  /usr/local/bin/kubectl" | sha256sum -c -
 
-# buildctl, the client of the buildkitd that runs on the bot's own computer,
-# at the same version. Only the client is taken from the release tarball.
-ARG BUILDKIT_VERSION=0.25.1
-ARG BUILDKIT_SHA256=85aa27c480fc9159705d21a3e66abe305f8dc708b8aeecd1e87bbc5c3de98642
+# buildctl, at the same version as the buildkitd on the bot's own computer.
+# The tarball was checked and unpacked in the buildctl stage above; only the
+# client is taken from it.
+COPY --from=buildctl --chmod=0755 /out/bin/buildctl /usr/local/bin/buildctl
 
-ADD https://github.com/moby/buildkit/releases/download/v${BUILDKIT_VERSION}/buildkit-v${BUILDKIT_VERSION}.linux-amd64.tar.gz /tmp/buildkit.tgz
-
-RUN echo "${BUILDKIT_SHA256}  /tmp/buildkit.tgz" | sha256sum -c - \
- && tar -xzf /tmp/buildkit.tgz -C /tmp bin/buildctl \
- && install -m 0755 /tmp/bin/buildctl /usr/local/bin/buildctl \
- && rm -rf /tmp/buildkit.tgz /tmp/bin
-
-COPY --from=tnctl /out/tnctl /usr/local/bin/tnctl
+COPY --from=tnctl --chmod=0755 /out/tnctl /usr/local/bin/tnctl
 
 # The Teknoir agent kit: the skills and the guard hook, from tnctl's embedded
 # copy, into the managed directory the desktop user cannot write. `--check`
 # fails the build if what was installed does not match what tnctl carries.
-RUN chmod 0755 /usr/local/bin/tnctl \
- && tnctl agent install --agent claude --managed /etc/claude-code/.claude \
- && tnctl agent list --managed /etc/claude-code/.claude --check
+#
+# A throwaway HOME keeps the build from writing /root/.tnctl.yaml into the
+# image: a first tnctl run creates its default configuration file.
+RUN HOME=/tmp/kit-home tnctl agent install --agent claude --managed /etc/claude-code/.claude \
+ && HOME=/tmp/kit-home tnctl agent list --managed /etc/claude-code/.claude --check \
+ && rm -rf /tmp/kit-home
 
 # The agent's own files: the managed settings and MCP registration (root-owned
 # so uid 1000 can neither change them nor point the hook elsewhere), the
@@ -275,7 +292,10 @@ RUN chown -R root:root /etc/claude-code \
  && chmod 0755 /usr/local/bin/teknoirbot-agent \
  && chmod 0644 /etc/xdg/autostart/teknoirbot-agent.desktop \
       /usr/share/applications/teknoirbot-agent.desktop \
-      /usr/share/applications/teknoirbot-agent-own.desktop
+      /usr/share/applications/teknoirbot-agent-own.desktop \
+ && chown -R root:root /usr/local/lib/teknoirbot \
+ && chmod 0755 /usr/local/lib/teknoirbot/bot-key \
+ && chmod 0644 /usr/local/lib/teknoirbot/platform-settings.json
 
 # The binary is pinned above; it must not replace itself at runtime.
 ENV DISABLE_AUTOUPDATER=1

@@ -306,12 +306,13 @@ rather than the `:main` tag used in the examples.
 TeknoirBot agent, an AI agent in an `xfce4-terminal` window. It is
 **amd64 only** (`make image` builds `desktop` for amd64 and arm64 unchanged).
 
-The agent stage adds these, all checksum-pinned: the unmodified terminal UI
-(2.1.319), `kubectl` 1.34.13, `buildctl` 0.25.1 (the bot's own `buildkitd`
-version), `tnctl` (built from `TNCTL_REF`), `git`, `curl`, `jq`,
-`mosquitto-clients` and `python3-paho-mqtt`. `tnctl agent install` puts the
-Teknoir skills and the `teknoir-guard` hook in `/etc/claude-code` root-owned,
-and `managed-settings.json` there registers the hook and the permissions.
+The agent stage adds checksum-pinned: the terminal UI (2.1.319), `kubectl`
+1.34.13 and `buildctl` 0.25.1 (the bot's own `buildkitd` version). `tnctl` is
+built from the `teknoir/cli` commit `TNCTL_REF`; the Debian packages (`git`,
+`curl`, `jq`, `mosquitto-clients`, `python3-venv`, `python3-pip`,
+`python3-paho-mqtt`) are not pinned. `tnctl agent install` puts the Teknoir
+skills and the `teknoir-guard` hook in `/etc/claude-code` root-owned, and
+`managed-settings.json` there registers the hook and the permissions.
 
 `/usr/local/bin/teknoirbot-agent` is the launcher the autostart and the two
 menu entries run. It starts the agent on the platform's model with the bot's

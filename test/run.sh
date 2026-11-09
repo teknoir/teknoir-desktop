@@ -2287,6 +2287,9 @@ AGENT="rootfs-agent/usr/local/bin/teknoirbot-agent"
 # Fixture data, not a credential: no key of this shape exists anywhere.
 AGENT_KEY='tbk1.teknoir-demo.scout.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 AGENT_API='https://tb-api.teknoir.cloud:8085/api/device/bot/v1'
+# The launcher's default: the settings file the image ships, whose
+# apiKeyHelper is how the terminal UI gets the key.
+AGENT_SETTINGS='/usr/local/lib/teknoirbot/platform-settings.json'
 
 # The terminal UI, tnctl and curl as stubs. None of the three can run here (one
 # is a vendored binary in the image, the other two talk to the platform), and
@@ -2320,11 +2323,24 @@ agent_stubs() {
   else
     printf 'SESSION none\n'
   fi
+  # What a failed model status must not leave behind: the header directory
+  # holds the bot's key.
+  if [ -n "${TEKNOIRBOT_OWN_DIR-}" ]; then
+    if [ -n "$(find "$TEKNOIRBOT_OWN_DIR" -mindepth 1 -maxdepth 1 -name 'agent.*' -print -quit 2>/dev/null)" ]; then
+      printf 'HEADER_DIR present\n'
+    else
+      printf 'HEADER_DIR absent\n'
+    fi
+  fi
 } >>"$CLAUDE_LOG"
 exit "${CLAUDE_EXIT:-0}"
 SH
   cat >"$dir/tnctl" <<'SH'
 #!/bin/sh
+printf 'TNCTL %s\n' "$*" >>"$TNCTL_LOG"
+if [ "${TNCTL_NOISE:-0}" = 1 ]; then
+  printf 'Creating default configuration file at /x/.tnctl.yaml\n'
+fi
 if [ "${TNCTL_FAIL:-0}" = 1 ]; then
   printf 'Error: the bot API answered 401 for this key\n' >&2
   exit 1
@@ -2358,11 +2374,13 @@ agent_reset() {
   AGENT_ERR="$AGENT_DIR/err"
   AGENT_CLAUDE_LOG="$AGENT_DIR/claude.log"
   AGENT_CURL_LOG="$AGENT_DIR/curl.log"
+  AGENT_TNCTL_LOG="$AGENT_DIR/tnctl.log"
   AGENT_STDIN=""
   AGENT_ARGS=()
   AGENT_EXTRA=()
   AGENT_API_SET="$AGENT_API"
   AGENT_TNCTL_FAIL=0
+  AGENT_TNCTL_NOISE=0
   AGENT_CURL_BODY='{"available": true, "model": "claude-sonnet-5-5"}'
   AGENT_CURL_STATUS=200
   AGENT_CURL_EXIT=0
@@ -2378,6 +2396,7 @@ agent_reset() {
 agent_run() {
   : >"$AGENT_CLAUDE_LOG"
   : >"$AGENT_CURL_LOG"
+  : >"$AGENT_TNCTL_LOG"
   env -i \
     PATH="$TMP/agent-bin:$TEST_PATH" \
     HOME="$AGENT_HOME" \
@@ -2393,11 +2412,13 @@ agent_run() {
     TEKNOIRBOT_CURL="$TMP/agent-bin/curl" \
     CLAUDE_LOG="$AGENT_CLAUDE_LOG" \
     CURL_LOG="$AGENT_CURL_LOG" \
+    TNCTL_LOG="$AGENT_TNCTL_LOG" \
     CLAUDE_EXIT="$AGENT_CLAUDE_EXIT" \
     CURL_BODY="$AGENT_CURL_BODY" \
     CURL_STATUS="$AGENT_CURL_STATUS" \
     CURL_EXIT="$AGENT_CURL_EXIT" \
     TNCTL_FAIL="$AGENT_TNCTL_FAIL" \
+    TNCTL_NOISE="$AGENT_TNCTL_NOISE" \
     "${AGENT_EXTRA[@]}" \
     bash "$AGENT" "${AGENT_ARGS[@]}" >"$AGENT_OUT" 2>"$AGENT_ERR" <<<"${AGENT_STDIN}"
   AGENT_RC=$?
@@ -2406,6 +2427,11 @@ agent_run() {
 # The value the claude stub recorded under one key ("BASE_URL https://…").
 agent_value() {
   sed -n "s/^$1 //p" "$AGENT_CLAUDE_LOG" | head -n 1
+}
+
+# One of the terminal UI's arguments, 1-based ("--settings", a path, ...).
+agent_arg() {
+  grep '^ARG ' "$AGENT_CLAUDE_LOG" | sed -n "$1p" | sed 's/^ARG //'
 }
 
 # The own-account session: a 0700 directory on the memory volume, there while
@@ -2421,6 +2447,11 @@ agent_own_account_problems() {
   [ "$(agent_value BASE_URL)" = '<unset>' ] || PROBLEMS+="a base URL was set in own-account mode; "
   [ "$(agent_value AUTH_TOKEN)" = unset ] || PROBLEMS+="a platform token was set in own-account mode; "
   [ "$(agent_value MODEL)" = '<unset>' ] || PROBLEMS+="a model was set in own-account mode; "
+  grep -q '^ARG --settings' "$AGENT_CLAUDE_LOG" &&
+    PROBLEMS+="the platform settings were passed in own-account mode; "
+  # A failed model status must not leave the key's header directory behind for
+  # the whole own-account session.
+  [ "$(agent_value HEADER_DIR)" = absent ] || PROBLEMS+="the key's header directory survived into own-account mode; "
   if [ -n "$(find "$AGENT_OWN_DIR" -mindepth 1 -print -quit)" ]; then
     PROBLEMS+="the login was left behind in $AGENT_OWN_DIR; "
   fi
@@ -2444,12 +2475,16 @@ test_agent_launcher() {
   agent_run
   problems=""
   [ "$AGENT_RC" = 0 ] || problems+="exit $AGENT_RC, want 0; "
-  [ "$(grep -m1 '^ARG ' "$AGENT_CLAUDE_LOG")" = 'ARG --append-system-prompt' ] ||
-    problems+="the first argument is not --append-system-prompt; "
+  [ "$(agent_arg 1)" = --settings ] ||
+    problems+="the first argument is not --settings ('$(agent_arg 1)'); "
+  [ "$(agent_arg 2)" = "$AGENT_SETTINGS" ] ||
+    problems+="the settings path is '$(agent_arg 2)', want $AGENT_SETTINGS; "
+  [ "$(agent_arg 3)" = --append-system-prompt ] ||
+    problems+="the third argument is not --append-system-prompt; "
   grep -qxF -- 'ARG --continue' "$AGENT_CLAUDE_LOG" && problems+="--continue without a conversation to continue; "
   grep -qF 'teknoir-demo/scout' "$AGENT_CLAUDE_LOG" || problems+="the system prompt does not name the bot; "
   [ "$(agent_value BASE_URL)" = "$AGENT_API/model" ] || problems+="base URL '$(agent_value BASE_URL)'; "
-  [ "$(agent_value AUTH_TOKEN)" = set ] || problems+="no auth token; "
+  [ "$(agent_value AUTH_TOKEN)" = unset ] || problems+="the key is in ANTHROPIC_AUTH_TOKEN, where every child inherits it; "
   [ "$(agent_value MODEL)" = claude-sonnet-5-5 ] || problems+="model '$(agent_value MODEL)'; "
   [ "$(agent_value NONESSENTIAL)" = 1 ] || problems+="nonessential traffic is not off; "
   [ "$(agent_value AUTOUPDATER)" = 1 ] || problems+="the autoupdater is not off; "
@@ -2466,17 +2501,35 @@ test_agent_launcher() {
     fail agent-platform "$problems"
   fi
 
-  # 2. A conversation for this directory exists: --continue comes first.
+  # 2. A conversation for this directory exists: --settings then --continue,
+  #    before the prompt. The work directory carries a "." so that the two
+  #    naming rules (every non-alphanumeric, not only "/") differ here.
   agent_reset continue
+  AGENT_WORK="$AGENT_DIR/work.v1"
+  projects="$AGENT_HOME/.claude/projects/$(printf '%s' "$AGENT_WORK" | sed 's/[^a-zA-Z0-9]/-/g')"
+  mkdir -p "$projects"
+  : >"$projects/session.jsonl"
+  agent_run
+  if [ "$AGENT_RC" = 0 ] && [ "$(agent_arg 1)" = --settings ] &&
+    [ "$(agent_arg 2)" = "$AGENT_SETTINGS" ] && [ "$(agent_arg 3)" = --continue ] &&
+    grep -qF 'teknoir-demo/scout' "$AGENT_CLAUDE_LOG"; then
+    pass agent-continue
+  else
+    fail agent-continue "exit $AGENT_RC, arguments '$(grep '^ARG ' "$AGENT_CLAUDE_LOG" | tr '\n' ' ')'"
+  fi
+
+  # 2b. The old rule (only "/" replaced) gives a different directory name: a
+  #     transcript under that one is not this directory's conversation.
+  agent_reset continue-old-name
+  AGENT_WORK="$AGENT_DIR/work.v1"
   projects="$AGENT_HOME/.claude/projects/${AGENT_WORK//\//-}"
   mkdir -p "$projects"
   : >"$projects/session.jsonl"
   agent_run
-  if [ "$AGENT_RC" = 0 ] && [ "$(grep -m1 '^ARG ' "$AGENT_CLAUDE_LOG")" = 'ARG --continue' ] &&
-    grep -qF 'teknoir-demo/scout' "$AGENT_CLAUDE_LOG"; then
-    pass agent-continue
+  if [ "$AGENT_RC" = 0 ] && ! grep -q '^ARG --continue' "$AGENT_CLAUDE_LOG"; then
+    pass agent-continue-old-name
   else
-    fail agent-continue "exit $AGENT_RC, first argument '$(grep -m1 '^ARG ' "$AGENT_CLAUDE_LOG")'"
+    fail agent-continue-old-name "exit $AGENT_RC, arguments '$(grep '^ARG ' "$AGENT_CLAUDE_LOG" | tr '\n' ' ')'"
   fi
 
   # 3. The platform model is down and the user says yes: a login of their own,
@@ -2592,6 +2645,99 @@ test_agent_launcher() {
     fail agent-whoami-fails "$PROBLEMS"
   fi
 
+  # 9b. The bot's first start: an older tnctl writes "Creating default
+  #     configuration file at ..." to stdout before the JSON. Every fact must
+  #     still be found.
+  agent_reset whoami-noise
+  AGENT_TNCTL_NOISE=1
+  agent_run
+  PROBLEMS=""
+  [ "$AGENT_RC" = 0 ] || PROBLEMS+="exit $AGENT_RC, want 0; "
+  grep -qF 'teknoir-demo/scout' "$AGENT_CLAUDE_LOG" ||
+    PROBLEMS+="the system prompt does not name the bot; "
+  grep -qF 'bot teknoir-demo/scout, model' "$AGENT_OUT" ||
+    PROBLEMS+="stdout has no bot line: '$(tr '\n' '|' <"$AGENT_OUT")'; "
+  if grep -qF 'gave no JSON' "$AGENT_ERR"; then
+    PROBLEMS+="the whoami answer was thrown away; "
+  fi
+  if [ -z "$PROBLEMS" ]; then
+    pass agent-whoami-noise
+  else
+    fail agent-whoami-noise "$PROBLEMS"
+  fi
+
+  # 9c. The bot key is refused (401): the message in the body is the reason,
+  #     and a "no" starts nothing.
+  agent_reset key-refused
+  AGENT_CURL_BODY='{"error":{"name":"AuthenticationError","message":"The bot key was not accepted."}}'
+  AGENT_CURL_STATUS=401
+  AGENT_STDIN=n
+  agent_run
+  PROBLEMS=""
+  [ "$AGENT_RC" = 0 ] || PROBLEMS+="exit $AGENT_RC, want 0; "
+  grep -qF 'The platform model is not available: The bot key was not accepted.' "$AGENT_OUT" ||
+    PROBLEMS+="the 401 message is not the reason: '$(tr '\n' '|' <"$AGENT_OUT")'; "
+  grep -qF 'Nothing started.' "$AGENT_OUT" || PROBLEMS+="Nothing started. is missing; "
+  [ ! -s "$AGENT_CLAUDE_LOG" ] || PROBLEMS+="the terminal UI was started; "
+  if [ -z "$PROBLEMS" ]; then
+    pass agent-status-401
+  else
+    fail agent-status-401 "$PROBLEMS"
+  fi
+
+  # 9d. The status request fails outright (no answer, no status): the failure
+  #     is the reason.
+  agent_reset curl-fails
+  AGENT_CURL_BODY=""
+  AGENT_CURL_STATUS=""
+  AGENT_CURL_EXIT=7
+  AGENT_STDIN=n
+  agent_run
+  PROBLEMS=""
+  [ "$AGENT_RC" = 0 ] || PROBLEMS+="exit $AGENT_RC, want 0; "
+  grep -qF 'the model status request failed' "$AGENT_OUT" ||
+    PROBLEMS+="the curl failure is not the reason: '$(tr '\n' '|' <"$AGENT_OUT")'; "
+  [ ! -s "$AGENT_CLAUDE_LOG" ] || PROBLEMS+="the terminal UI was started; "
+  if [ -z "$PROBLEMS" ]; then
+    pass agent-status-curl-fails
+  else
+    fail agent-status-curl-fails "$PROBLEMS"
+  fi
+
+  # 9e. A 200 that says the model is not available: its reason, not the status.
+  agent_reset unavailable-200
+  AGENT_CURL_BODY='{"available":false,"reason":"r"}'
+  AGENT_CURL_STATUS=200
+  AGENT_STDIN=n
+  agent_run
+  PROBLEMS=""
+  [ "$AGENT_RC" = 0 ] || PROBLEMS+="exit $AGENT_RC, want 0; "
+  grep -qF 'The platform model is not available: r.' "$AGENT_OUT" ||
+    PROBLEMS+="the reason is not r: '$(tr '\n' '|' <"$AGENT_OUT")'; "
+  [ ! -s "$AGENT_CLAUDE_LOG" ] || PROBLEMS+="the terminal UI was started; "
+  if [ -z "$PROBLEMS" ]; then
+    pass agent-status-unavailable-200
+  else
+    fail agent-status-unavailable-200 "$PROBLEMS"
+  fi
+
+  # 9f. The helper the terminal UI calls for the key: the file's content with
+  #     every whitespace character dropped, and not a byte more (no newline of
+  #     its own).
+  local helper="rootfs-agent/usr/local/lib/teknoirbot/bot-key" helper_want
+  local helper_rc
+  helper_want='tbk1.teknoir-demo.scout.abc'
+  printf '  %s\n' "$helper_want" >"$TMP/agent-helper-key"
+  printf '%s' "$helper_want" >"$TMP/agent-helper-want"
+  env -i PATH="$TEST_PATH" TNCTL_BOT_KEY_FILE="$TMP/agent-helper-key" \
+    sh "$helper" >"$TMP/agent-helper-out" 2>"$TMP/agent-helper.err"
+  helper_rc=$?
+  if [ "$helper_rc" = 0 ] && cmp -s "$TMP/agent-helper-out" "$TMP/agent-helper-want"; then
+    pass agent-key-helper
+  else
+    fail agent-key-helper "the helper printed '$(od -An -c "$TMP/agent-helper-out" | tr -s ' ')': $(tr '\n' '|' <"$TMP/agent-helper.err")"
+  fi
+
   # 10. The key reaches no command line. Every stub log and the launcher's own
   #     output, in every case run above; and the header file that held it is
   #     gone once the terminal UI has started (the exec would skip the trap).
@@ -2634,6 +2780,7 @@ test_agent_managed_config() {
 
   if [ -z "$problems" ] && ! python3 -I -c '
 import json
+import re
 import sys
 
 with open("rootfs-agent/etc/claude-code/managed-settings.json", encoding="utf-8") as fh:
@@ -2666,6 +2813,39 @@ else:
 server = (mcp.get("mcpServers") or {}).get("teknoir") or {}
 if server.get("command") != "tnctl" or server.get("args") != ["mcp"]:
     problems.append("the teknoir MCP server is %r" % (server,))
+
+# Every tnctl rule must name a command and a subcommand that exist: a rule for
+# a command tnctl does not have never matches, and reads as if it allowed or
+# asked something that it does not.
+commands = {"whoami", "devices", "device", "robots", "robot", "config",
+            "inspect", "api", "mqtt", "login"}
+subcommands = {
+    "robot": {"add", "disable", "enable", "remove"},
+    "device": {"disable", "enable", "remove"},
+    "config": {"get", "diff", "links", "kinds", "wait", "logs", "set", "unset",
+               "promote", "on", "off", "reset", "add", "remove", "edit",
+               "delete", "try", "untry"},
+    "mqtt": {"stream"},
+}
+for rule in ((permissions.get("allow") or []) + (permissions.get("ask") or [])
+             + (permissions.get("deny") or [])):
+    match = re.match(r"^Bash\(tnctl(?: (.+?))?:\*\)$", rule)
+    if not match:
+        if rule.startswith("Bash(tnctl"):
+            problems.append("%r is not a tnctl <command>:* rule" % (rule,))
+        continue
+    words = (match.group(1) or "").split()
+    if not words or words[0] not in commands:
+        problems.append("%s: %r is not a tnctl command"
+                        % (rule, words[0] if words else ""))
+        continue
+    # A rule with the command word alone ("tnctl robot:*") is a prefix rule
+    # covering "tnctl robot amr-01" too, so it names no subcommand to check.
+    if len(words) >= 2:
+        allowed = subcommands.get(words[0])
+        if allowed is not None and words[1] not in allowed:
+            problems.append("%s: %r is not a tnctl %s subcommand"
+                            % (rule, words[1], words[0]))
 
 if problems:
     sys.exit("; ".join(problems))
@@ -2705,6 +2885,110 @@ test_agent_dockerfile() {
     pass agent-dockerfile
   else
     fail agent-dockerfile "$problems"
+  fi
+}
+
+# A FROM can only see the ARGs declared before the first FROM: an ARG inside a
+# stage is that stage's, and the base name of a later FROM using it is blank
+# (buildkit's --check fails with "base name (${GO_IMAGE}) should not be
+# blank"). Every $VAR a FROM uses must therefore be one of BuildKit's
+# predefined platform arguments or declared before the first FROM.
+test_agent_dockerfile_from_args() {
+  local problems="" line n=0 var in_stage=0
+  local -A declared=(
+    [BUILDPLATFORM]=1 [TARGETPLATFORM]=1 [TARGETARCH]=1 [TARGETOS]=1
+    [BUILDARCH]=1 [BUILDOS]=1
+  )
+  while IFS= read -r line; do
+    n=$((n + 1))
+    case "$line" in
+      FROM\ *)
+        in_stage=1
+        # One line of output per variable: mapfile, not read -a (one line).
+        # shellcheck disable=SC2016 # these are the Dockerfile's variables
+        mapfile -t vars < <(grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?' <<<"$line" |
+          tr -d '${}')
+        for var in "${vars[@]}"; do
+          [ -n "${declared[$var]:-}" ] ||
+            problems+="line $n: FROM uses \$$var, which no ARG before the first FROM declares; "
+        done
+        ;;
+      ARG\ *)
+        if [ "$in_stage" = 0 ]; then
+          var="${line#ARG }"
+          var="${var%%=*}"
+          var="${var%% *}"
+          declared[$var]=1
+        fi
+        ;;
+    esac
+  done <Dockerfile
+  if [ -z "$problems" ]; then
+    pass agent-dockerfile-from-args
+  else
+    fail agent-dockerfile-from-args "$problems"
+  fi
+}
+
+# Each pinned binary is checked and installed in one layer, mode set by the
+# ADD/COPY itself: a separate chmod RUN would keep a second copy of all 338 MB
+# of the terminal UI in the image. The buildkit tarball stays in its own stage.
+test_agent_dockerfile_layers() {
+  local problems="" path chmod_lines
+  # shellcheck disable=SC2016 # ${CLAUDE_VERSION} is the Dockerfile's, not ours
+  grep -qF 'ADD --chmod=0755 https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/linux-x64/claude' Dockerfile ||
+    problems+="the terminal UI ADD does not carry --chmod=0755; "
+  # shellcheck disable=SC2016 # ${KUBECTL_VERSION} is the Dockerfile's, not ours
+  grep -qF 'ADD --chmod=0755 https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl' Dockerfile ||
+    problems+="the kubectl ADD does not carry --chmod=0755; "
+  grep -qF 'COPY --from=tnctl --chmod=0755 /out/tnctl /usr/local/bin/tnctl' Dockerfile ||
+    problems+="the tnctl COPY does not carry --chmod=0755; "
+  grep -qF 'COPY --from=buildctl --chmod=0755 /out/bin/buildctl /usr/local/bin/buildctl' Dockerfile ||
+    problems+="buildctl is not copied from its own stage; "
+  # The chmod command, not the --chmod= option of an ADD or COPY.
+  chmod_lines="$(grep -vE '^[[:space:]]*#' Dockerfile |
+    grep -E '(^|[[:space:];&|(])chmod[[:space:]]')"
+  for path in /opt/claude /usr/local/bin/kubectl /usr/local/bin/tnctl /usr/local/bin/buildctl; do
+    if grep -qF "$path" <<<"$chmod_lines"; then
+      problems+="a RUN still chmods $path; "
+    fi
+  done
+  if sed -n '/^FROM desktop AS agent$/,$p' Dockerfile | grep -qE '^[[:space:]]*ADD[[:space:]].*buildkit'; then
+    problems+="the agent stage adds the buildkit tarball itself; "
+  fi
+  if [ -z "$problems" ]; then
+    pass agent-dockerfile-layers
+  else
+    fail agent-dockerfile-layers "$problems"
+  fi
+}
+
+# The agent image's tnctl ref: a branch or a tag would be fetched as it is, and
+# BuildKit's cache would keep the first commit it ever fetched. The Makefile
+# refuses anything but the full commit, before docker runs.
+test_agent_makefile() {
+  local bindir="$TMP/make-bin" docker_log="$TMP/make-docker.log" rc out
+  local full=0123456789abcdef0123456789abcdef01234567
+  mkdir -p "$bindir"
+  printf '#!/bin/sh\nprintf "docker %%s\\n" "$*" >>"%s"\n' "$docker_log" >"$bindir/docker"
+  chmod 0755 "$bindir/docker"
+  : >"$docker_log"
+
+  out="$(env -i PATH="$bindir:$TEST_PATH" make image-agent TNCTL_REF=main 2>&1)"
+  rc=$?
+  if [ "$rc" != 0 ] && [ ! -s "$docker_log" ] &&
+    [[ "$out" == *"TNCTL_REF must be a full 40-character teknoir/cli commit"* ]]; then
+    pass agent-makefile-ref-not-a-commit
+  else
+    fail agent-makefile-ref-not-a-commit "exit $rc, docker called: $([ -s "$docker_log" ] && echo yes || echo no), output '$(tr '\n' '|' <<<"$out")'"
+  fi
+
+  out="$(env -i PATH="$bindir:$TEST_PATH" make -n image-agent TNCTL_REF="$full" 2>&1)"
+  rc=$?
+  if [ "$rc" = 0 ] && [[ "$out" == *"--build-arg TNCTL_REF=$full"* ]]; then
+    pass agent-makefile-ref-full-commit
+  else
+    fail agent-makefile-ref-full-commit "exit $rc, output '$(tr '\n' '|' <<<"$out")'"
   fi
 }
 
@@ -2754,6 +3038,9 @@ test_healthcheck_blacklisted
 test_agent_launcher
 test_agent_managed_config
 test_agent_dockerfile
+test_agent_dockerfile_from_args
+test_agent_dockerfile_layers
+test_agent_makefile
 test_agent_desktop_entries
 
 printf '\n%d passed, %d failed, %d skipped\n' "$passed" "$failed" "$skipped"
