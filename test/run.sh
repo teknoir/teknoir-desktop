@@ -86,8 +86,10 @@ test_shellcheck() {
 
   # The same set the brief's command names, globs included: host/ also holds a
   # systemd unit, which carries a "shellcheck disable=all" comment of its own.
+  # The key helper is a script without an extension and is listed by name.
   local scripts=() f
-  for f in rootfs/usr/local/bin/* rootfs-agent/usr/local/bin/* host/* test/*.sh; do
+  for f in rootfs/usr/local/bin/* rootfs-agent/usr/local/bin/* \
+    rootfs-agent/usr/local/lib/teknoirbot/bot-key host/* test/*.sh; do
     [ -f "$f" ] && scripts+=("$f")
   done
 
@@ -2332,12 +2334,16 @@ agent_stubs() {
       printf 'HEADER_DIR absent\n'
     fi
   fi
+  # The whole environment, not only the named variables above: a launcher that
+  # exported the key under some other name would leak it to every child.
+  env | sed 's/^/ENV /'
 } >>"$CLAUDE_LOG"
 exit "${CLAUDE_EXIT:-0}"
 SH
   cat >"$dir/tnctl" <<'SH'
 #!/bin/sh
 printf 'TNCTL %s\n' "$*" >>"$TNCTL_LOG"
+env | sed 's/^/ENV /' >>"$TNCTL_LOG"
 if [ "${TNCTL_NOISE:-0}" = 1 ]; then
   printf 'Creating default configuration file at /x/.tnctl.yaml\n'
 fi
@@ -2355,6 +2361,7 @@ SH
   for arg in "$@"; do printf ' %s' "$arg"; done
   printf '\n'
 } >>"$CURL_LOG"
+env | sed 's/^/ENV /' >>"$CURL_LOG"
 printf '%s\n%s' "$CURL_BODY" "$CURL_STATUS"
 exit "${CURL_EXIT:-0}"
 SH
@@ -2458,7 +2465,7 @@ agent_own_account_problems() {
 }
 
 test_agent_launcher() {
-  local problems projects
+  local problems projects env_var
 
   # 1. The model is available: the terminal UI runs as the bot, with the
   #    platform's proxy in front of it and the desktop user's own variables
@@ -2492,6 +2499,12 @@ test_agent_launcher() {
   [ "$(agent_value API_KEY)" = unset ] || problems+="ANTHROPIC_API_KEY survived; "
   [ "$(agent_value CWD)" = "$AGENT_WORK" ] || problems+="cwd '$(agent_value CWD)', want $AGENT_WORK; "
   [ "$(agent_value SESSION)" = none ] || problems+="a config directory was made in platform mode; "
+  # The terminal UI's whole environment, under any name: a key exported there
+  # is inherited by every Bash child, every hook and the MCP server.
+  env_var="$(grep '^ENV ' "$AGENT_CLAUDE_LOG" | grep -F -- "$AGENT_KEY" | head -n 1)"
+  env_var="${env_var#ENV }"
+  env_var="${env_var%%=*}"
+  [ -z "$env_var" ] || problems+="the key is in the terminal UI's environment as $env_var; "
   grep -qF -- '-H @' "$AGENT_CURL_LOG" || problems+="the status call did not read the key from a header file; "
   grep -qF 'TeknoirBot agent, powered by Claude: bot teknoir-demo/scout, model claude-sonnet-5-5.' "$AGENT_OUT" ||
     problems+="the start line is '$(head -n 1 "$AGENT_OUT")'; "
@@ -2721,21 +2734,26 @@ test_agent_launcher() {
     fail agent-status-unavailable-200 "$PROBLEMS"
   fi
 
-  # 9f. The helper the terminal UI calls for the key: the file's content with
-  #     every whitespace character dropped, and not a byte more (no newline of
-  #     its own).
+  # 9f. The helper the terminal UI calls for the key: run as the image runs
+  #     it (its own shebang, its exec bit), the file's content with every
+  #     whitespace character dropped, and not a byte more (no newline of its
+  #     own).
   local helper="rootfs-agent/usr/local/lib/teknoirbot/bot-key" helper_want
   local helper_rc
   helper_want='tbk1.teknoir-demo.scout.abc'
   printf '  %s\n' "$helper_want" >"$TMP/agent-helper-key"
   printf '%s' "$helper_want" >"$TMP/agent-helper-want"
-  env -i PATH="$TEST_PATH" TNCTL_BOT_KEY_FILE="$TMP/agent-helper-key" \
-    sh "$helper" >"$TMP/agent-helper-out" 2>"$TMP/agent-helper.err"
-  helper_rc=$?
-  if [ "$helper_rc" = 0 ] && cmp -s "$TMP/agent-helper-out" "$TMP/agent-helper-want"; then
-    pass agent-key-helper
+  if [ ! -x "$helper" ]; then
+    fail agent-key-helper "bot-key is not executable in the tree"
   else
-    fail agent-key-helper "the helper printed '$(od -An -c "$TMP/agent-helper-out" | tr -s ' ')': $(tr '\n' '|' <"$TMP/agent-helper.err")"
+    env -i PATH="$TEST_PATH" TNCTL_BOT_KEY_FILE="$TMP/agent-helper-key" \
+      "$helper" >"$TMP/agent-helper-out" 2>"$TMP/agent-helper.err"
+    helper_rc=$?
+    if [ "$helper_rc" = 0 ] && cmp -s "$TMP/agent-helper-out" "$TMP/agent-helper-want"; then
+      pass agent-key-helper
+    else
+      fail agent-key-helper "the helper printed '$(od -An -c "$TMP/agent-helper-out" | tr -s ' ')': $(tr '\n' '|' <"$TMP/agent-helper.err")"
+    fi
   fi
 
   # 10. The key reaches no command line. Every stub log and the launcher's own
@@ -2846,6 +2864,26 @@ for rule in ((permissions.get("allow") or []) + (permissions.get("ask") or [])
         if allowed is not None and words[1] not in allowed:
             problems.append("%s: %r is not a tnctl %s subcommand"
                             % (rule, words[1], words[0]))
+
+# A "Bash(P:*)" rule matches P, or P and then a space: the terminal UI does not
+# skip flags, so "tnctl robot -o json remove x" matches a "tnctl robot:*" allow
+# rule but not the "tnctl robot remove:*" ask rule, and runs unasked, because
+# tnctl still takes the persistent flags before the subcommand. An allow rule
+# may therefore never be a prefix of an ask or deny rule.
+def bash_prefix(rule):
+    match = re.match(r"^Bash\((.+):\*\)$", rule)
+    return match.group(1) if match else None
+
+guarded = [(rule, bash_prefix(rule)) for rule in
+           (permissions.get("ask") or []) + (permissions.get("deny") or [])]
+for allow_rule in permissions.get("allow") or []:
+    prefix = bash_prefix(allow_rule)
+    if prefix is None:
+        continue
+    for guard_rule, guard_prefix in guarded:
+        if guard_prefix is not None and guard_prefix.startswith(prefix + " "):
+            problems.append("allow %r covers flag-first forms of %r"
+                            % (prefix, guard_prefix))
 
 if problems:
     sys.exit("; ".join(problems))
@@ -2983,12 +3021,13 @@ test_agent_makefile() {
     fail agent-makefile-ref-not-a-commit "exit $rc, docker called: $([ -s "$docker_log" ] && echo yes || echo no), output '$(tr '\n' '|' <<<"$out")'"
   fi
 
-  out="$(env -i PATH="$bindir:$TEST_PATH" make -n image-agent TNCTL_REF="$full" 2>&1)"
+  : >"$docker_log"
+  out="$(env -i PATH="$bindir:$TEST_PATH" make image-agent TNCTL_REF="$full" 2>&1)"
   rc=$?
-  if [ "$rc" = 0 ] && [[ "$out" == *"--build-arg TNCTL_REF=$full"* ]]; then
+  if [ "$rc" = 0 ] && grep -qF -- "--build-arg TNCTL_REF=$full" "$docker_log"; then
     pass agent-makefile-ref-full-commit
   else
-    fail agent-makefile-ref-full-commit "exit $rc, output '$(tr '\n' '|' <<<"$out")'"
+    fail agent-makefile-ref-full-commit "exit $rc, docker log '$(tr '\n' '|' <"$docker_log")', output '$(tr '\n' '|' <<<"$out")'"
   fi
 }
 

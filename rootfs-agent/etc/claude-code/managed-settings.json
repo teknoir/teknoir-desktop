@@ -5,9 +5,7 @@
     "allow": [
       "Bash(tnctl whoami:*)",
       "Bash(tnctl devices:*)",
-      "Bash(tnctl device:*)",
       "Bash(tnctl robots:*)",
-      "Bash(tnctl robot:*)",
       "Bash(tnctl config get:*)",
       "Bash(tnctl config diff:*)",
       "Bash(tnctl config links:*)",

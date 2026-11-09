@@ -25,7 +25,7 @@ test:
 	bash test/run.sh
 
 lint:
-	shellcheck -x rootfs/usr/local/bin/* rootfs-agent/usr/local/bin/* host/* test/*.sh
+	shellcheck -x rootfs/usr/local/bin/* rootfs-agent/usr/local/bin/* rootfs-agent/usr/local/lib/teknoirbot/bot-key host/* test/*.sh
 	hadolint Dockerfile
 
 # buildx with two platforms needs a builder that supports them

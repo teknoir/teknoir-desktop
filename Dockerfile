@@ -201,9 +201,9 @@ ARG BUILDKIT_SHA256=85aa27c480fc9159705d21a3e66abe305f8dc708b8aeecd1e87bbc5c3de9
 
 ADD https://github.com/moby/buildkit/releases/download/v${BUILDKIT_VERSION}/buildkit-v${BUILDKIT_VERSION}.linux-amd64.tar.gz /tmp/buildkit.tgz
 
-# DL4006 asks for pipefail before the pipe: this stage's shell is the Go
-# image's busybox ash, which has none, and the pipe's only producer is echo,
-# whose failure would make sha256sum fail on the missing line anyway.
+# DL4006 asks for pipefail before the pipe. The pipe's only producer is echo,
+# and if it failed, sha256sum -c would find no line to check and fail itself,
+# so the RUN fails either way.
 # hadolint ignore=DL4006
 RUN echo "${BUILDKIT_SHA256}  /tmp/buildkit.tgz" | sha256sum -c - \
  && mkdir -p /out \
