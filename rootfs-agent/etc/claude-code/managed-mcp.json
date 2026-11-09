@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "teknoir": {
+      "command": "tnctl",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

@@ -87,7 +87,7 @@ test_shellcheck() {
   # The same set the brief's command names, globs included: host/ also holds a
   # systemd unit, which carries a "shellcheck disable=all" comment of its own.
   local scripts=() f
-  for f in rootfs/usr/local/bin/* host/* test/*.sh; do
+  for f in rootfs/usr/local/bin/* rootfs-agent/usr/local/bin/* host/* test/*.sh; do
     [ -f "$f" ] && scripts+=("$f")
   done
 
@@ -268,6 +268,8 @@ if data.get("path") != "websockify":
     | grep -E '(^|[[:space:];&|(/])ln([[:space:]]|$)' \
     | sed -E 's/^[[:space:]]*(&&[[:space:]]*)?//; s/[[:space:]]*\\$//')"
   want_lns=$'ln -s /run/desktop/notice.json /opt/novnc/teknoir-notice.json\nln -s /usr/bin/Xtigervnc /usr/local/bin/Xvnc'
+  # ... and the agent stage's, the versioned terminal UI's /usr/local/bin entry.
+  want_lns+=$'\nln -s /opt/claude/${CLAUDE_VERSION}/claude /usr/local/bin/claude'
   if [ "$lns" != "$want_lns" ]; then
     problems+="the Dockerfile's ln commands are not exactly the notice and Xvnc links: '$(printf '%s' "$lns" | tr '\n' ';')'; "
   fi
@@ -2279,6 +2281,452 @@ PY
   REFUSE_HTTP_PID=""
 }
 
+# --- the agent image --------------------------------------------------------
+
+AGENT="rootfs-agent/usr/local/bin/teknoirbot-agent"
+# Fixture data, not a credential: no key of this shape exists anywhere.
+AGENT_KEY='tbk1.teknoir-demo.scout.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+AGENT_API='https://tb-api.teknoir.cloud:8085/api/device/bot/v1'
+
+# The terminal UI, tnctl and curl as stubs. None of the three can run here (one
+# is a vendored binary in the image, the other two talk to the platform), and
+# each records what the launcher gave it. The token is recorded as set/unset
+# only, never by value, so a leaked key would show up in the argv log instead.
+agent_stubs() {
+  local dir="$TMP/agent-bin"
+  mkdir -p "$dir"
+  cat >"$dir/claude" <<'SH'
+#!/bin/sh
+{
+  printf 'CWD %s\n' "$PWD"
+  for arg in "$@"; do printf 'ARG %s\n' "$arg"; done
+  printf 'BASE_URL %s\n' "${ANTHROPIC_BASE_URL-<unset>}"
+  if [ -n "${ANTHROPIC_AUTH_TOKEN+x}" ]; then
+    printf 'AUTH_TOKEN set\n'
+  else
+    printf 'AUTH_TOKEN unset\n'
+  fi
+  printf 'MODEL %s\n' "${ANTHROPIC_MODEL-<unset>}"
+  printf 'CONFIG_DIR %s\n' "${CLAUDE_CONFIG_DIR-<unset>}"
+  printf 'NONESSENTIAL %s\n' "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC-<unset>}"
+  printf 'AUTOUPDATER %s\n' "${DISABLE_AUTOUPDATER-<unset>}"
+  if [ -n "${ANTHROPIC_API_KEY+x}" ]; then
+    printf 'API_KEY set\n'
+  else
+    printf 'API_KEY unset\n'
+  fi
+  if [ -n "${CLAUDE_CONFIG_DIR-}" ] && [ -d "${CLAUDE_CONFIG_DIR-}" ]; then
+    printf 'SESSION %s\n' "$(stat -c %a "$CLAUDE_CONFIG_DIR")"
+  else
+    printf 'SESSION none\n'
+  fi
+} >>"$CLAUDE_LOG"
+exit "${CLAUDE_EXIT:-0}"
+SH
+  cat >"$dir/tnctl" <<'SH'
+#!/bin/sh
+if [ "${TNCTL_FAIL:-0}" = 1 ]; then
+  printf 'Error: the bot API answered 401 for this key\n' >&2
+  exit 1
+fi
+printf '%s\n' '{"mode":"bot","bot":{"namespace":"teknoir-demo","name":"scout","unit":"field-team","access":"creator"},"creator":{"email":"claude-agent@teknoir.cloud"},"domain":"teknoir.cloud"}'
+SH
+  # The real curl with -w '\n%{http_code}': the body, a newline, the status.
+  cat >"$dir/curl" <<'SH'
+#!/bin/sh
+{
+  printf 'CURL'
+  for arg in "$@"; do printf ' %s' "$arg"; done
+  printf '\n'
+} >>"$CURL_LOG"
+printf '%s\n%s' "$CURL_BODY" "$CURL_STATUS"
+exit "${CURL_EXIT:-0}"
+SH
+  chmod 0755 "$dir/claude" "$dir/tnctl" "$dir/curl"
+}
+
+# The per-case variables, back to the state of a bot that is fully set up: a
+# key, the bot API's URL, an available model, a tnctl that answers, and an
+# own-account volume that exists.
+agent_reset() {
+  AGENT_DIR="$TMP/agent/$1"
+  AGENT_HOME="$AGENT_DIR/home"
+  AGENT_WORK="$AGENT_DIR/work"
+  AGENT_OWN_DIR="$AGENT_DIR/own"
+  AGENT_KEY_PATH="$AGENT_DIR/key"
+  AGENT_OUT="$AGENT_DIR/out"
+  AGENT_ERR="$AGENT_DIR/err"
+  AGENT_CLAUDE_LOG="$AGENT_DIR/claude.log"
+  AGENT_CURL_LOG="$AGENT_DIR/curl.log"
+  AGENT_STDIN=""
+  AGENT_ARGS=()
+  AGENT_EXTRA=()
+  AGENT_API_SET="$AGENT_API"
+  AGENT_TNCTL_FAIL=0
+  AGENT_CURL_BODY='{"available": true, "model": "claude-sonnet-5-5"}'
+  AGENT_CURL_STATUS=200
+  AGENT_CURL_EXIT=0
+  AGENT_CLAUDE_EXIT=0
+  mkdir -p "$AGENT_HOME" "$AGENT_WORK" "$AGENT_OWN_DIR"
+  printf '%s\n' "$AGENT_KEY" >"$AGENT_KEY_PATH"
+  chmod 0600 "$AGENT_KEY_PATH"
+}
+
+# One run of the launcher: a clean environment (nothing of this suite's
+# leaks in), the stubs first on PATH, and a here-string on stdin. Sets
+# AGENT_RC; leaves stdout and stderr in $AGENT_OUT and $AGENT_ERR.
+agent_run() {
+  : >"$AGENT_CLAUDE_LOG"
+  : >"$AGENT_CURL_LOG"
+  env -i \
+    PATH="$TMP/agent-bin:$TEST_PATH" \
+    HOME="$AGENT_HOME" \
+    TEKNOIRBOT_WORK_DIR="$AGENT_WORK" \
+    TEKNOIRBOT_OWN_DIR="$AGENT_OWN_DIR" \
+    TEKNOIRBOT_API="$AGENT_API_SET" \
+    TEKNOIR_DOMAIN=teknoir.cloud \
+    TEKNOIRBOT_NAMESPACE=teknoir-demo \
+    TEKNOIRBOT_NAME=scout \
+    TNCTL_BOT_KEY_FILE="$AGENT_KEY_PATH" \
+    TEKNOIRBOT_CLAUDE="$TMP/agent-bin/claude" \
+    TEKNOIRBOT_TNCTL="$TMP/agent-bin/tnctl" \
+    TEKNOIRBOT_CURL="$TMP/agent-bin/curl" \
+    CLAUDE_LOG="$AGENT_CLAUDE_LOG" \
+    CURL_LOG="$AGENT_CURL_LOG" \
+    CLAUDE_EXIT="$AGENT_CLAUDE_EXIT" \
+    CURL_BODY="$AGENT_CURL_BODY" \
+    CURL_STATUS="$AGENT_CURL_STATUS" \
+    CURL_EXIT="$AGENT_CURL_EXIT" \
+    TNCTL_FAIL="$AGENT_TNCTL_FAIL" \
+    "${AGENT_EXTRA[@]}" \
+    bash "$AGENT" "${AGENT_ARGS[@]}" >"$AGENT_OUT" 2>"$AGENT_ERR" <<<"${AGENT_STDIN}"
+  AGENT_RC=$?
+}
+
+# The value the claude stub recorded under one key ("BASE_URL https://…").
+agent_value() {
+  sed -n "s/^$1 //p" "$AGENT_CLAUDE_LOG" | head -n 1
+}
+
+# The own-account session: a 0700 directory on the memory volume, there while
+# the terminal UI runs and gone after it. Leaves the problems in PROBLEMS.
+agent_own_account_problems() {
+  local session
+  session="$(agent_value CONFIG_DIR)"
+  case "$session" in
+    "$AGENT_OWN_DIR"/s.*) ;;
+    *) PROBLEMS+="the config directory is '$session', want one under $AGENT_OWN_DIR; " ;;
+  esac
+  [ "$(agent_value SESSION)" = 700 ] || PROBLEMS+="the session directory is not 0700 ('$(agent_value SESSION)'); "
+  [ "$(agent_value BASE_URL)" = '<unset>' ] || PROBLEMS+="a base URL was set in own-account mode; "
+  [ "$(agent_value AUTH_TOKEN)" = unset ] || PROBLEMS+="a platform token was set in own-account mode; "
+  [ "$(agent_value MODEL)" = '<unset>' ] || PROBLEMS+="a model was set in own-account mode; "
+  if [ -n "$(find "$AGENT_OWN_DIR" -mindepth 1 -print -quit)" ]; then
+    PROBLEMS+="the login was left behind in $AGENT_OWN_DIR; "
+  fi
+}
+
+test_agent_launcher() {
+  local problems projects
+
+  # 1. The model is available: the terminal UI runs as the bot, with the
+  #    platform's proxy in front of it and the desktop user's own variables
+  #    gone.
+  agent_reset key-model
+  mkdir -p "$AGENT_DIR/leaked-config"
+  AGENT_EXTRA=(
+    'ANTHROPIC_API_KEY=sk-ant-api03-from-the-desktop-user'
+    'ANTHROPIC_AUTH_TOKEN=from-the-desktop-user'
+    'ANTHROPIC_BASE_URL=https://leaked.example'
+    'ANTHROPIC_MODEL=leaked-model'
+    "CLAUDE_CONFIG_DIR=$AGENT_DIR/leaked-config"
+  )
+  agent_run
+  problems=""
+  [ "$AGENT_RC" = 0 ] || problems+="exit $AGENT_RC, want 0; "
+  [ "$(grep -m1 '^ARG ' "$AGENT_CLAUDE_LOG")" = 'ARG --append-system-prompt' ] ||
+    problems+="the first argument is not --append-system-prompt; "
+  grep -qxF -- 'ARG --continue' "$AGENT_CLAUDE_LOG" && problems+="--continue without a conversation to continue; "
+  grep -qF 'teknoir-demo/scout' "$AGENT_CLAUDE_LOG" || problems+="the system prompt does not name the bot; "
+  [ "$(agent_value BASE_URL)" = "$AGENT_API/model" ] || problems+="base URL '$(agent_value BASE_URL)'; "
+  [ "$(agent_value AUTH_TOKEN)" = set ] || problems+="no auth token; "
+  [ "$(agent_value MODEL)" = claude-sonnet-5-5 ] || problems+="model '$(agent_value MODEL)'; "
+  [ "$(agent_value NONESSENTIAL)" = 1 ] || problems+="nonessential traffic is not off; "
+  [ "$(agent_value AUTOUPDATER)" = 1 ] || problems+="the autoupdater is not off; "
+  [ "$(agent_value CONFIG_DIR)" = '<unset>' ] || problems+="CLAUDE_CONFIG_DIR survived ('$(agent_value CONFIG_DIR)'); "
+  [ "$(agent_value API_KEY)" = unset ] || problems+="ANTHROPIC_API_KEY survived; "
+  [ "$(agent_value CWD)" = "$AGENT_WORK" ] || problems+="cwd '$(agent_value CWD)', want $AGENT_WORK; "
+  [ "$(agent_value SESSION)" = none ] || problems+="a config directory was made in platform mode; "
+  grep -qF -- '-H @' "$AGENT_CURL_LOG" || problems+="the status call did not read the key from a header file; "
+  grep -qF 'TeknoirBot agent, powered by Claude: bot teknoir-demo/scout, model claude-sonnet-5-5.' "$AGENT_OUT" ||
+    problems+="the start line is '$(head -n 1 "$AGENT_OUT")'; "
+  if [ -z "$problems" ]; then
+    pass agent-platform
+  else
+    fail agent-platform "$problems"
+  fi
+
+  # 2. A conversation for this directory exists: --continue comes first.
+  agent_reset continue
+  projects="$AGENT_HOME/.claude/projects/${AGENT_WORK//\//-}"
+  mkdir -p "$projects"
+  : >"$projects/session.jsonl"
+  agent_run
+  if [ "$AGENT_RC" = 0 ] && [ "$(grep -m1 '^ARG ' "$AGENT_CLAUDE_LOG")" = 'ARG --continue' ] &&
+    grep -qF 'teknoir-demo/scout' "$AGENT_CLAUDE_LOG"; then
+    pass agent-continue
+  else
+    fail agent-continue "exit $AGENT_RC, first argument '$(grep -m1 '^ARG ' "$AGENT_CLAUDE_LOG")'"
+  fi
+
+  # 3. The platform model is down and the user says yes: a login of their own,
+  #    in memory, gone when the terminal is. claude's exit status is the
+  #    launcher's.
+  agent_reset own-from-503
+  AGENT_CURL_BODY='{"available": false, "reason": "the monthly budget is spent"}'
+  AGENT_CURL_STATUS=503
+  AGENT_STDIN=y
+  AGENT_CLAUDE_EXIT=7
+  agent_run
+  PROBLEMS=""
+  [ "$AGENT_RC" = 7 ] || PROBLEMS+="exit $AGENT_RC, want the terminal UI's 7; "
+  grep -qF 'The platform model is not available: the monthly budget is spent.' "$AGENT_OUT" ||
+    PROBLEMS+="the reason was not printed: '$(head -n 3 "$AGENT_OUT")'; "
+  grep -qF 'Starting with your own Anthropic account.' "$AGENT_OUT" || PROBLEMS+="own-account mode did not start; "
+  agent_own_account_problems
+  if [ -z "$PROBLEMS" ]; then
+    pass agent-own-after-503
+  else
+    fail agent-own-after-503 "$PROBLEMS"
+  fi
+
+  # 4. ... and no: nothing starts at all.
+  agent_reset no-own-from-503
+  AGENT_CURL_BODY='{"available": false, "reason": "the monthly budget is spent"}'
+  AGENT_CURL_STATUS=503
+  AGENT_STDIN=n
+  agent_run
+  if [ "$AGENT_RC" = 0 ] && [ ! -s "$AGENT_CLAUDE_LOG" ] &&
+    grep -qF 'Nothing started.' "$AGENT_OUT"; then
+    pass agent-nothing-started
+  else
+    fail agent-nothing-started "exit $AGENT_RC, claude log '$(tr '\n' '|' <"$AGENT_CLAUDE_LOG")', output '$(cat "$AGENT_OUT")'"
+  fi
+
+  # 5. No key: a bot made before the agent. It says so and starts with the
+  #    user's own account instead.
+  agent_reset no-key
+  AGENT_KEY_PATH="$AGENT_DIR/no-such-key"
+  agent_run
+  PROBLEMS=""
+  [ "$AGENT_RC" = 0 ] || PROBLEMS+="exit $AGENT_RC, want 0; "
+  grep -qF "This bot's computer has no platform key" "$AGENT_OUT" || PROBLEMS+="the missing key was not named; "
+  [ ! -s "$AGENT_CURL_LOG" ] || PROBLEMS+="the model status was called without a key; "
+  agent_own_account_problems
+  if [ -z "$PROBLEMS" ]; then
+    pass agent-no-key
+  else
+    fail agent-no-key "$PROBLEMS"
+  fi
+
+  # 6. No bot API either (the pod did not set it): the same path.
+  agent_reset no-api
+  AGENT_API_SET=""
+  agent_run
+  if [ "$AGENT_RC" = 0 ] && grep -qF "This bot's computer has no platform key" "$AGENT_OUT" &&
+    [ ! -s "$AGENT_CURL_LOG" ] && [ "$(agent_value SESSION)" = 700 ]; then
+    pass agent-no-api
+  else
+    fail agent-no-api "exit $AGENT_RC, output '$(tr '\n' '|' <"$AGENT_OUT")', session '$(agent_value SESSION)'"
+  fi
+
+  # 7. --own-account with everything in place: no platform call at all.
+  agent_reset own-option
+  AGENT_ARGS=(--own-account)
+  agent_run
+  PROBLEMS=""
+  [ "$AGENT_RC" = 0 ] || PROBLEMS+="exit $AGENT_RC, want 0; "
+  [ ! -s "$AGENT_CURL_LOG" ] || PROBLEMS+="the model status was called; "
+  [ "$(agent_value SESSION)" = 700 ] || PROBLEMS+="own-account mode did not start; "
+  if grep -q 'has no platform key' "$AGENT_OUT"; then
+    PROBLEMS+="it complained about a key that is there; "
+  fi
+  if grep -q '^ARG ' "$AGENT_CLAUDE_LOG"; then
+    PROBLEMS+="the terminal UI got arguments in own-account mode; "
+  fi
+  if [ -z "$PROBLEMS" ]; then
+    pass agent-own-option
+  else
+    fail agent-own-option "$PROBLEMS"
+  fi
+
+  # 8. No memory volume: own-account mode refuses instead of writing the login
+  #    to the home volume.
+  agent_reset no-own-dir
+  AGENT_ARGS=(--own-account)
+  AGENT_OWN_DIR="$AGENT_DIR/missing-volume"
+  agent_run
+  if [ "$AGENT_RC" = 1 ] && [ ! -s "$AGENT_CLAUDE_LOG" ] &&
+    grep -qF 'needs the memory volume' "$AGENT_ERR"; then
+    pass agent-own-needs-volume
+  else
+    fail agent-own-needs-volume "exit $AGENT_RC, stderr '$(cat "$AGENT_ERR")'"
+  fi
+
+  # 9. tnctl cannot say who the bot is: the agent still starts, with what the
+  #    pod says and without the bot's own facts.
+  agent_reset whoami-fails
+  AGENT_TNCTL_FAIL=1
+  agent_run
+  PROBLEMS=""
+  [ "$AGENT_RC" = 0 ] || PROBLEMS+="exit $AGENT_RC, want 0; "
+  grep -qF 'tnctl whoami failed: Error: the bot API answered 401 for this key' "$AGENT_ERR" ||
+    PROBLEMS+="the whoami failure was not printed; "
+  if grep -qF 'You are the TeknoirBot agent of bot' "$AGENT_CLAUDE_LOG"; then
+    PROBLEMS+="the prompt claims the bot's facts anyway; "
+  fi
+  [ "$(agent_value MODEL)" = claude-sonnet-5-5 ] || PROBLEMS+="the agent did not start on the platform model; "
+  if [ -z "$PROBLEMS" ]; then
+    pass agent-whoami-fails
+  else
+    fail agent-whoami-fails "$PROBLEMS"
+  fi
+
+  # 10. The key reaches no command line. Every stub log and the launcher's own
+  #     output, in every case run above; and the header file that held it is
+  #     gone once the terminal UI has started (the exec would skip the trap).
+  local hits
+  hits="$(find "$TMP/agent" -type f \( -name '*.log' -o -name out -o -name err \) \
+    -exec grep -lF "$AGENT_KEY" {} + 2>/dev/null || true)"
+  if [ -n "$hits" ]; then
+    fail agent-key-never-leaks "the key is in: $(printf '%s' "$hits" | tr '\n' ' ')"
+  elif [ -n "$(find "$TMP/agent/key-model" -name headers -print -quit)" ]; then
+    fail agent-key-never-leaks "the request header file survived the exec"
+  else
+    pass agent-key-never-leaks
+  fi
+
+  # 11. An unknown option is a usage error, not a start.
+  agent_reset unknown-option
+  AGENT_ARGS=(--bogus)
+  agent_run
+  if [ "$AGENT_RC" = 2 ] && [ ! -s "$AGENT_CLAUDE_LOG" ] &&
+    grep -qF 'usage: teknoirbot-agent' "$AGENT_ERR"; then
+    pass agent-unknown-option
+  else
+    fail agent-unknown-option "exit $AGENT_RC, stderr '$(tr '\n' '|' <"$AGENT_ERR")'"
+  fi
+}
+
+# The managed settings are the whole of the agent's permissions, and the only
+# place the guard hook is registered: root-owned, so uid 1000 can neither
+# change them nor unregister the hook.
+test_agent_managed_config() {
+  local problems="" f
+  for f in rootfs-agent/etc/claude-code/managed-settings.json \
+    rootfs-agent/etc/claude-code/managed-mcp.json; do
+    if [ ! -f "$f" ]; then
+      problems+="$f missing; "
+    elif ! python3 -I -m json.tool "$f" >/dev/null 2>&1; then
+      problems+="$f is not valid JSON; "
+    fi
+  done
+
+  if [ -z "$problems" ] && ! python3 -I -c '
+import json
+import sys
+
+with open("rootfs-agent/etc/claude-code/managed-settings.json", encoding="utf-8") as fh:
+    settings = json.load(fh)
+with open("rootfs-agent/etc/claude-code/managed-mcp.json", encoding="utf-8") as fh:
+    mcp = json.load(fh)
+
+problems = []
+permissions = settings.get("permissions") or {}
+if permissions.get("defaultMode") != "acceptEdits":
+    problems.append("permissions.defaultMode is %r" % (permissions.get("defaultMode"),))
+if permissions.get("disableBypassPermissionsMode") != "disable":
+    problems.append("disableBypassPermissionsMode is %r"
+                    % (permissions.get("disableBypassPermissionsMode"),))
+deny = permissions.get("deny") or []
+for want in ("Bash(tnctl login:*)", "Read(//run/teknoirbot/**)"):
+    if want not in deny:
+        problems.append("deny misses %s" % want)
+
+hooks = (settings.get("hooks") or {}).get("PreToolUse") or []
+if len(hooks) != 1:
+    problems.append("%d PreToolUse hooks, want 1" % len(hooks))
+else:
+    if hooks[0].get("matcher") != "Bash|mcp__teknoir__.*":
+        problems.append("the matcher is %r" % (hooks[0].get("matcher"),))
+    commands = [h.get("command") for h in hooks[0].get("hooks") or []]
+    if commands != ["/etc/claude-code/.claude/hooks/teknoir-guard"]:
+        problems.append("the hook commands are %r" % (commands,))
+
+server = (mcp.get("mcpServers") or {}).get("teknoir") or {}
+if server.get("command") != "tnctl" or server.get("args") != ["mcp"]:
+    problems.append("the teknoir MCP server is %r" % (server,))
+
+if problems:
+    sys.exit("; ".join(problems))
+' >"$TMP/agent-config.out" 2>&1; then
+    problems+="$(tr '\n' '|' <"$TMP/agent-config.out")"
+  fi
+
+  if [ -z "$problems" ]; then
+    pass agent-managed-config
+  else
+    fail agent-managed-config "$problems"
+  fi
+}
+
+test_agent_dockerfile() {
+  local problems="" var stage
+  for stage in desktop tnctl agent; do
+    grep -qE "^FROM .* AS ${stage}$" Dockerfile || problems+="no stage named $stage; "
+  done
+  grep -qxF 'FROM desktop AS agent' Dockerfile || problems+="the agent stage is not built on desktop; "
+  # Each pinned download is verified before it is used.
+  for var in CLAUDE_SHA256 KUBECTL_SHA256 BUILDKIT_SHA256; do
+    grep -qE "\\$\\{${var}\\}.*sha256sum -c -" Dockerfile ||
+      problems+="the ${var} checksum is not verified with sha256sum -c; "
+  done
+  grep -qF 'tnctl agent install --agent claude --managed /etc/claude-code/.claude' Dockerfile ||
+    problems+="the agent kit is not installed by tnctl; "
+  grep -qF 'tnctl agent list --managed /etc/claude-code/.claude --check' Dockerfile ||
+    problems+="the agent kit is not checked with --check; "
+  # The product name is never ours to use: the image says "TeknoirBot agent,
+  # powered by Claude".
+  if grep -rlF 'Claude Code' "$AGENT" rootfs-agent/etc/xdg/autostart/*.desktop \
+    rootfs-agent/usr/share/applications/*.desktop >/dev/null 2>&1; then
+    problems+="the string 'Claude Code' is in $(grep -rlF 'Claude Code' "$AGENT" rootfs-agent/etc/xdg/autostart/*.desktop rootfs-agent/usr/share/applications/*.desktop | tr '\n' ' '); "
+  fi
+  if [ -z "$problems" ]; then
+    pass agent-dockerfile
+  else
+    fail agent-dockerfile "$problems"
+  fi
+}
+
+test_agent_desktop_entries() {
+  local files=(
+    rootfs-agent/etc/xdg/autostart/teknoirbot-agent.desktop
+    rootfs-agent/usr/share/applications/teknoirbot-agent.desktop
+    rootfs-agent/usr/share/applications/teknoirbot-agent-own.desktop
+  )
+  if ! command -v desktop-file-validate >/dev/null 2>&1; then
+    skip agent-desktop-entries "desktop-file-validate is not on PATH"
+    return
+  fi
+  if desktop-file-validate "${files[@]}" >"$TMP/agent-desktop.out" 2>&1; then
+    pass agent-desktop-entries
+  else
+    fail agent-desktop-entries "$(head -20 "$TMP/agent-desktop.out" | tr '\n' '|')"
+  fi
+}
+
+agent_stubs
+
 # --- run --------------------------------------------------------------------
 
 test_shellcheck
@@ -2303,6 +2751,10 @@ test_notice_script
 test_healthcheck
 test_healthcheck_bad_http
 test_healthcheck_blacklisted
+test_agent_launcher
+test_agent_managed_config
+test_agent_dockerfile
+test_agent_desktop_entries
 
 printf '\n%d passed, %d failed, %d skipped\n' "$passed" "$failed" "$skipped"
 if [ "$failed" -ne 0 ]; then

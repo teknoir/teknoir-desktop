@@ -1,0 +1,67 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "disableBypassPermissionsMode": "disable",
+    "allow": [
+      "Bash(tnctl whoami:*)",
+      "Bash(tnctl devices:*)",
+      "Bash(tnctl device get:*)",
+      "Bash(tnctl robots:*)",
+      "Bash(tnctl robot get:*)",
+      "Bash(tnctl config get:*)",
+      "Bash(tnctl config diff:*)",
+      "Bash(tnctl config links:*)",
+      "Bash(tnctl config kinds:*)",
+      "Bash(tnctl inspect:*)",
+      "Bash(tnctl api GET:*)",
+      "Bash(tnctl mqtt stream:*)",
+      "mcp__teknoir__*",
+      "Bash(kubectl get:*)",
+      "Bash(kubectl describe:*)",
+      "Bash(kubectl logs:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git clone:*)",
+      "Bash(mosquitto_sub:*)",
+      "Bash(jq:*)",
+      "Bash(buildctl du:*)"
+    ],
+    "ask": [
+      "Bash(tnctl robot add:*)",
+      "Bash(tnctl config set:*)",
+      "Bash(tnctl config unset:*)",
+      "Bash(tnctl config promote:*)",
+      "Bash(tnctl config on:*)",
+      "Bash(tnctl config off:*)",
+      "Bash(tnctl config reset:*)",
+      "Bash(tnctl config add:*)",
+      "Bash(tnctl config remove:*)",
+      "Bash(tnctl api POST:*)",
+      "Bash(tnctl api PUT:*)",
+      "Bash(tnctl api PATCH:*)",
+      "Bash(tnctl api DELETE:*)",
+      "Bash(kubectl apply:*)",
+      "Bash(kubectl delete:*)",
+      "Bash(kubectl patch:*)",
+      "Bash(kubectl scale:*)",
+      "Bash(buildctl build:*)"
+    ],
+    "deny": [
+      "Bash(tnctl login:*)",
+      "Read(//run/teknoirbot/**)",
+      "Edit(//etc/claude-code/**)",
+      "Write(//etc/claude-code/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|mcp__teknoir__.*",
+        "hooks": [
+          { "type": "command", "command": "/etc/claude-code/.claude/hooks/teknoir-guard" }
+        ]
+      }
+    ]
+  }
+}

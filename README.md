@@ -299,12 +299,37 @@ These manifests are **documentation**. Another component (device-controller's
 Desktop feature) renders the real ones, and deployments pin the image by digest
 rather than the `:main` tag used in the examples.
 
+## The agent image
+
+`make image-agent` builds a second image from the same Dockerfile,
+`ghcr.io/teknoir/teknoir-desktop:dev-agent`: the desktop above plus the
+TeknoirBot agent, an AI agent in an `xfce4-terminal` window. It is
+**amd64 only** (`make image` builds `desktop` for amd64 and arm64 unchanged).
+
+The agent stage adds these, all checksum-pinned: the unmodified terminal UI
+(2.1.319), `kubectl` 1.34.13, `buildctl` 0.25.1 (the bot's own `buildkitd`
+version), `tnctl` (built from `TNCTL_REF`), `git`, `curl`, `jq`,
+`mosquitto-clients` and `python3-paho-mqtt`. `tnctl agent install` puts the
+Teknoir skills and the `teknoir-guard` hook in `/etc/claude-code` root-owned,
+and `managed-settings.json` there registers the hook and the permissions.
+
+`/usr/local/bin/teknoirbot-agent` is the launcher the autostart and the two
+menu entries run. It starts the agent on the platform's model with the bot's
+key (`TEKNOIRBOT_API`; the key never reaches a command line), and falls back to
+`--own-account`: the user's own Anthropic account, whose login lives on the
+memory volume (`/run/teknoirbot-own`) for that terminal only.
+
+`TNCTL_REF` has no default in the Makefile and must name a `teknoir/cli` commit
+with `tnctl agent install`; the Dockerfile's default ref predates it, so a
+plain `docker buildx build --target agent` fails at the kit step by design.
+
 ## Build and test
 
 ```sh
 make test          # bash test/run.sh: the whole suite
 make lint          # shellcheck + hadolint
-make image         # docker buildx build --platform linux/amd64,linux/arm64
+make image         # docker buildx build --target desktop --platform linux/amd64,linux/arm64
+make image-agent   # the agent image, amd64: make image-agent TNCTL_REF=<commit>
 ```
 
 The test suite needs no docker and no root. It runs `shellcheck -x` over every

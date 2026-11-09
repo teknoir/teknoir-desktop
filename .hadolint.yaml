@@ -1,8 +1,14 @@
 ---
 # hadolint configuration for teknoir-desktop.
 #
-# Only two rules are ignored, both deliberately:
+# Three rules are ignored, all deliberately:
 ignored:
+  # DL3018: apk package versions are not pinned. The tnctl build stage is
+  # pinned by the digest of golang:1.26-alpine, and that image's apk index
+  # only keeps the current version of git, so pinning a version in the
+  # Dockerfile would break the build as soon as the index moves on. Same
+  # reasoning as DL3008 below.
+  - DL3018
   # DL3008: apt package versions are not pinned. Debian trixie is the pinned
   # base (by digest) and its archive only keeps the current version of each
   # package, so pinning a version in the Dockerfile would break the build as

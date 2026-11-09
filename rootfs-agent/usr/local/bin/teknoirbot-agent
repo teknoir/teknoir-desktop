@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+#
+# teknoirbot-agent: the TeknoirBot agent, started in an xfce4-terminal.
+#
+# Started by the XFCE autostart (/etc/xdg/autostart/teknoirbot-agent.desktop)
+# and from the application menu (/usr/share/applications/
+# teknoirbot-agent.desktop, and teknoirbot-agent-own.desktop for a login of
+# the user's own). It is NOT a child of desktop-entrypoint: closing the agent
+# is a normal user action and must never stop the desktop.
+#
+# Two modes:
+#
+#   platform (the default)  the platform's model proxy with this bot's key,
+#                           and tnctl in bot mode with the bot's own access
+#   own account             the user's own Anthropic account, with a login
+#                           that lives on the memory volume for this terminal
+#                           only and is removed when the terminal closes
+#
+# The terminal UI is started unmodified. The permissions, the skills, the MCP
+# server and the guard hook come from /etc/claude-code (root-owned, so this
+# user cannot change them); this script only builds its environment.
+set -euo pipefail
+
+PROG=teknoirbot-agent
+
+# Paths and commands, overridable so the test suite can point them elsewhere.
+KEY_FILE="${TNCTL_BOT_KEY_FILE:-/run/teknoirbot/key}"
+OWN_DIR="${TEKNOIRBOT_OWN_DIR:-/run/teknoirbot-own}"
+WORK_DIR="${TEKNOIRBOT_WORK_DIR:-${HOME:-/home/desktop}/work}"
+CLAUDE="${TEKNOIRBOT_CLAUDE:-claude}"
+TNCTL="${TEKNOIRBOT_TNCTL:-tnctl}"
+CURL="${TEKNOIRBOT_CURL:-curl}"
+
+# Set by the pod: the bot API's base URL (empty when this bot's computer was
+# made before the agent), and the domain for the prompt.
+API="${TEKNOIRBOT_API:-}"
+DOMAIN="${TEKNOIR_DOMAIN:-}"
+
+# The request header file (it holds the key) and the own-account session: both
+# are removed on every way out of this script.
+HEADER_DIR=""
+OWN_SESSION=""
+
+cleanup() {
+  if [ -n "$HEADER_DIR" ]; then
+    rm -rf "$HEADER_DIR"
+    HEADER_DIR=""
+  fi
+  if [ -n "$OWN_SESSION" ]; then
+    rm -rf "$OWN_SESSION"
+    OWN_SESSION=""
+  fi
+}
+trap cleanup EXIT
+
+usage() {
+  cat <<'EOF'
+usage: teknoirbot-agent [--own-account]
+
+  no option      start with the platform's model, as this bot
+  --own-account  start with your own Anthropic account; the login lasts for
+                 this terminal only
+EOF
+}
+
+# json_get PATH: the value at a jq PATH in BODY, on one line, and empty when
+# BODY is not JSON or the path is not there. Never fails the caller. A false
+# boolean is "false", not the empty string (jq's // treats false as absent).
+json_get() {
+  jq -r "($1) as \$v | if \$v == null then \"\" else (\$v | tostring) end" \
+    <<<"$BODY" 2>/dev/null || true
+}
+
+# Own-account mode: the terminal UI talks to the user's own Anthropic account.
+# The login lives in a 0700 directory on the memory volume, never in the home
+# volume, and goes when this terminal does. No exec here: the session has to
+# outlive the child only for as long as the child runs.
+own_account() {
+  if [ ! -d "$OWN_DIR" ] || [ ! -w "$OWN_DIR" ]; then
+    printf 'Own-account mode needs the memory volume %s, which this computer does not have.\n' \
+      "$OWN_DIR" >&2
+    exit 1
+  fi
+  OWN_SESSION="$(mktemp -d "$OWN_DIR/s.XXXXXX")"
+  chmod 0700 "$OWN_SESSION"
+  # A signal must not leave the login behind: the EXIT trap cleans up.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  export CLAUDE_CONFIG_DIR="$OWN_SESSION"
+  printf 'Starting with your own Anthropic account. Your login lasts only for this terminal: it is kept in memory and removed when the terminal closes.\n'
+  local rc=0
+  "$CLAUDE" || rc=$?
+  exit "$rc"
+}
+
+OWN_ACCOUNT=0
+for arg in "$@"; do
+  case "$arg" in
+    --own-account) OWN_ACCOUNT=1 ;;
+    --help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf '%s: unexpected argument %s\n' "$PROG" "$arg" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+# Nothing from the surrounding session may reach the agent: no API key of the
+# desktop user, no base URL, model or config directory from an earlier start.
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL ANTHROPIC_MODEL CLAUDE_CONFIG_DIR
+export DISABLE_AUTOUPDATER=1
+mkdir -p "$WORK_DIR"
+cd "$WORK_DIR"
+
+if [ "$OWN_ACCOUNT" = 1 ]; then
+  own_account
+fi
+
+# No platform key: the bot was made before the agent image existed.
+if [ -z "$API" ] || [ ! -r "$KEY_FILE" ] || [ ! -s "$KEY_FILE" ]; then
+  printf "This bot's computer has no platform key (the bot was made before the agent). Re-create the bot for platform access; starting with your own Anthropic account.\n"
+  own_account
+fi
+
+# The key goes into a request header file that curl reads with -H @file: it
+# must never appear on a command line, in this script's or in curl's argv. The
+# file is on the memory volume when there is one, so the key is written to
+# memory only.
+if [ -d "$OWN_DIR" ] && [ -w "$OWN_DIR" ]; then
+  HEADER_DIR="$(mktemp -d "$OWN_DIR/agent.XXXXXX")" || HEADER_DIR=""
+fi
+if [ -z "$HEADER_DIR" ]; then
+  HEADER_DIR="$(mktemp -d /dev/shm/teknoirbot-agent.XXXXXX)" || {
+    printf '%s: no writable directory for the model request header\n' "$PROG" >&2
+    exit 1
+  }
+fi
+HEADERS="$HEADER_DIR/headers"
+KEY="$(<"$KEY_FILE")"
+KEY="${KEY#"${KEY%%[![:space:]]*}"}"
+KEY="${KEY%"${KEY##*[![:space:]]}"}"
+(
+  umask 077
+  printf 'Authorization: Bearer %s\n' "$KEY" >"$HEADERS"
+)
+chmod 0600 "$HEADERS"
+
+# Who this bot is: the bot API's answer through tnctl, which runs in bot mode
+# here. A failure is not fatal: the agent starts with what the pod says, only
+# without the bot's own facts.
+NS=""
+NAME=""
+CREATOR=""
+ACCESS=""
+UNIT=""
+if WHOAMI="$("$TNCTL" whoami -o json 2>"$HEADER_DIR/whoami.err")"; then
+  NS="$(jq -r '.bot.namespace // ""' <<<"$WHOAMI" 2>/dev/null || true)"
+  NAME="$(jq -r '.bot.name // ""' <<<"$WHOAMI" 2>/dev/null || true)"
+  CREATOR="$(jq -r '.creator.email // ""' <<<"$WHOAMI" 2>/dev/null || true)"
+  ACCESS="$(jq -r '.bot.access // ""' <<<"$WHOAMI" 2>/dev/null || true)"
+  UNIT="$(jq -r '.bot.unit // ""' <<<"$WHOAMI" 2>/dev/null || true)"
+else
+  printf 'tnctl whoami failed: %s\n' "$(head -n 1 "$HEADER_DIR/whoami.err")" >&2
+fi
+
+# The platform's model, from the bot API. The answer is the contract the bot
+# API serves: 200 {"available": true, "model": "..."}; 503 {"available":
+# false, "reason": "..."}; anything else is a failure, and its reason is the
+# body's error message or reason, or else the status code.
+RESP="$("$CURL" -sS --max-time 15 -H "@$HEADERS" -w '\n%{http_code}' "$API/model/status")" || RESP=""
+HTTP=""
+BODY=""
+if [[ "$RESP" == *$'\n'* ]]; then
+  HTTP="${RESP##*$'\n'}"
+  BODY="${RESP%$'\n'*}"
+fi
+
+MODEL=""
+REASON=""
+if [ "$HTTP" = 200 ] && [ "$(json_get '.available')" = true ] && [ -n "$(json_get '.model')" ]; then
+  MODEL="$(json_get '.model')"
+else
+  REASON="$(json_get '.error.message')"
+  if [ -z "$REASON" ]; then
+    REASON="$(json_get '.reason')"
+  fi
+  if [ -z "$REASON" ]; then
+    REASON="${HTTP:-the model status request failed}"
+  fi
+fi
+
+if [ -z "$MODEL" ]; then
+  printf 'The platform model is not available: %s.\n' "$REASON"
+  printf 'Use your own Anthropic account instead? [y/N] '
+  ANSWER=""
+  IFS= read -r ANSWER || true
+  case "$ANSWER" in
+    y | Y | yes | Yes | YES) own_account ;;
+    *)
+      printf 'Nothing started.\n'
+      exit 0
+      ;;
+  esac
+fi
+
+export ANTHROPIC_BASE_URL="$API/model"
+export ANTHROPIC_AUTH_TOKEN="$KEY"
+export ANTHROPIC_MODEL="$MODEL"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+
+# The request header has done its job (the token is in the environment now) and
+# the exec below would skip the EXIT trap: remove it here.
+cleanup
+
+# The system prompt addition: one line per fact the platform answered.
+PROMPT=""
+prompt_add() {
+  if [ -n "$1" ]; then
+    if [ -n "$PROMPT" ]; then
+      PROMPT+=$'\n'
+    fi
+    PROMPT+="$1"
+  fi
+}
+if [ -n "$NS" ] && [ -n "$NAME" ]; then
+  if [ -n "$DOMAIN" ]; then
+    prompt_add "You are the TeknoirBot agent of bot $NS/$NAME on the Teknoir platform ($DOMAIN)."
+  else
+    prompt_add "You are the TeknoirBot agent of bot $NS/$NAME on the Teknoir platform."
+  fi
+fi
+if [ -n "$CREATOR" ]; then
+  fact="You act for $CREATOR"
+  if [ -n "$ACCESS" ]; then
+    fact+=" with agent access \"$ACCESS\""
+  fi
+  if [ -n "$UNIT" ]; then
+    fact+=" in unit $UNIT"
+  fi
+  prompt_add "$fact."
+fi
+prompt_add 'Use tnctl (it runs in bot mode here) and the teknoir skills; run "tnctl whoami" when unsure what you may do.'
+prompt_add 'Never ask anyone for a Teknoir password and never run "tnctl login".'
+
+if [ -n "$NS" ] && [ -n "$NAME" ]; then
+  printf 'TeknoirBot agent, powered by Claude: bot %s/%s, model %s.\n' "$NS" "$NAME" "$MODEL"
+else
+  printf 'TeknoirBot agent, powered by Claude: model %s.\n' "$MODEL"
+fi
+
+# Continue the conversation this directory already has, if it has one: the
+# terminal UI keeps its transcripts under the home volume, keyed by the
+# working directory with every "/" replaced by "-".
+PROJECTS="${HOME:-/home/desktop}/.claude/projects/${WORK_DIR//\//-}"
+if compgen -G "$PROJECTS/*.jsonl" >/dev/null; then
+  exec "$CLAUDE" --continue --append-system-prompt "$PROMPT"
+fi
+exec "$CLAUDE" --append-system-prompt "$PROMPT"
