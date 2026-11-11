@@ -293,8 +293,9 @@ RUN echo "${OPENCODE_SHA256}  /tmp/opencode.tgz" | sha256sum -c - \
  && rm -rf /tmp/oc-home
 
 # The Teknoir kit: the skills, from tnctl's embedded copy, into the managed
-# directory the container user cannot write. The Coder links each work
-# directory's .agents/skills to /etc/teknoirbot/kit/skills. `--check` fails the
+# directory the container user cannot write. OpenCode finds them through the
+# config's skills.paths (/etc/teknoirbot/kit/skills), not through a work
+# directory's .agents/skills, which the Coder turns off. `--check` fails the
 # build if what was installed does not match what tnctl carries. Both name
 # OpenCode, the only agent in this image, so the kit holds only the skills
 # (no guard hook).
@@ -308,22 +309,29 @@ RUN HOME=/tmp/kit-home tnctl agent install --agent opencode --managed /etc/tekno
 
 # The council's own files: OpenCode's configuration. Root-owned, so uid 1000
 # can neither change the provider it points at nor the permissions; 0644, so
-# every process in the container can read it.
+# every process in the container can read it. /etc/teknoirbot/xdg is OpenCode's
+# config home: it must hold an opencode/ directory, and OpenCode writes nothing
+# else there, so an empty root-owned one leaves uid 1000 no global config to
+# plant either.
 COPY rootfs-council/ /
 
-RUN chown -R root:root /etc/teknoirbot \
+RUN install -d -o root -g root -m 0755 /etc/teknoirbot/xdg/opencode \
+ && chown -R root:root /etc/teknoirbot \
  && chmod -R go-w /etc/teknoirbot \
  && chmod 0644 /etc/teknoirbot/opencode.json
 
-# OpenCode reads this one file, not whatever a work directory might carry; HOME
-# and the XDG directories live on the work volume, so a new pod keeps the
-# Coder's sessions, state and cache.
+# OpenCode reads this one file, not whatever a work directory might carry
+# (project configs are off), and its config home is the read-only one above;
+# HOME and the other XDG directories live on the work volume, so a new pod
+# keeps the Coder's sessions, state and cache. The Coder sets the same values
+# for every task; these cover anything else that starts OpenCode here.
 ENV OPENCODE_CONFIG=/etc/teknoirbot/opencode.json \
+    OPENCODE_DISABLE_PROJECT_CONFIG=1 \
     HOME=/work/home \
     XDG_DATA_HOME=/work/home/.local/share \
     XDG_STATE_HOME=/work/home/.local/state \
     XDG_CACHE_HOME=/work/home/.cache \
-    XDG_CONFIG_HOME=/work/home/.config
+    XDG_CONFIG_HOME=/etc/teknoirbot/xdg
 
 WORKDIR /work
 

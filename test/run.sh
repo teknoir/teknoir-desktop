@@ -2416,11 +2416,12 @@ test_council_runtime() {
     tr -d "\\\\" | tr -s ' ' '\n' | grep -E '^[A-Z_]+=' | sort)"
   want_envs="$(printf '%s\n' \
     OPENCODE_CONFIG=/etc/teknoirbot/opencode.json \
+    OPENCODE_DISABLE_PROJECT_CONFIG=1 \
     HOME=/work/home \
     XDG_DATA_HOME=/work/home/.local/share \
     XDG_STATE_HOME=/work/home/.local/state \
     XDG_CACHE_HOME=/work/home/.cache \
-    XDG_CONFIG_HOME=/work/home/.config | sort)"
+    XDG_CONFIG_HOME=/etc/teknoirbot/xdg | sort)"
   [ "$envs" = "$want_envs" ] ||
     problems+="the ENV block is '$(printf '%s' "$envs" | tr '\n' ' ')'; "
   if [ -z "$problems" ]; then
@@ -2498,6 +2499,14 @@ if settings.get("baseURL") != "{env:TEKNOIRBOT_API}/model/v1":
     problems.append("baseURL is %r" % (settings.get("baseURL"),))
 if settings.get("apiKey") != "{file:/run/teknoirbot/key}":
     problems.append("apiKey is %r" % (settings.get("apiKey"),))
+# The proxy labels each request's AUDIT line with the turn the Coder runs for.
+# OpenCode reads headers from settings.headers; options.headers is ignored.
+if settings.get("headers") != {"x-teknoir-turn": "{env:TEKNOIRBOT_TURN}"}:
+    problems.append("headers are %r" % (settings.get("headers"),))
+# With project configs off, a work directory's .agents/skills is not read: the
+# kit's skills are named here.
+if cfg.get("skills") != {"paths": ["/etc/teknoirbot/kit/skills"]}:
+    problems.append("skills is %r" % (cfg.get("skills"),))
 if problems:
     sys.exit("; ".join(problems))
 PY
@@ -2617,6 +2626,8 @@ test_council_dockerfile_managed() {
     problems+="/etc/teknoirbot is group-writable; "
   grep -qF 'chmod 0644 /etc/teknoirbot/opencode.json' <<<"$stage" ||
     problems+="opencode.json is not 0644; "
+  grep -qF 'install -d -o root -g root -m 0755 /etc/teknoirbot/xdg/opencode' <<<"$stage" ||
+    problems+="the read-only config home /etc/teknoirbot/xdg/opencode is not made root-owned; "
   if [ -z "$problems" ]; then
     pass council-dockerfile-managed
   else

@@ -9,6 +9,11 @@
     "teknoir"
   ],
   "plugins": [],
+  "skills": {
+    "paths": [
+      "/etc/teknoirbot/kit/skills"
+    ]
+  },
   "permissions": [
     {
       "action": "*",
@@ -42,7 +47,10 @@
       "package": "@opencode/ai/providers/anthropic-compatible",
       "settings": {
         "baseURL": "{env:TEKNOIRBOT_API}/model/v1",
-        "apiKey": "{file:/run/teknoirbot/key}"
+        "apiKey": "{file:/run/teknoirbot/key}",
+        "headers": {
+          "x-teknoir-turn": "{env:TEKNOIRBOT_TURN}"
+        }
       },
       "models": {
         "claude-sonnet-5-5": {
