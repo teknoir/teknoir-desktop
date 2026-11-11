@@ -299,30 +299,47 @@ These manifests are **documentation**. Another component (device-controller's
 Desktop feature) renders the real ones, and deployments pin the image by digest
 rather than the `:main` tag used in the examples.
 
-## The agent image
+## The council image
 
-`make image-agent` builds a second image from the same Dockerfile,
-`ghcr.io/teknoir/teknoir-desktop:dev-agent`: the desktop above plus the
-TeknoirBot agent, an AI agent in an `xfce4-terminal` window. It is
-**amd64 only** (`make image` builds `desktop` for amd64 and arm64 unchanged).
+`make image-council` builds a second image from the same Dockerfile,
+`ghcr.io/teknoir/teknoir-desktop:dev-council`: the TeknoirBot **council**, a
+headless daemon with no desktop. It runs `tnctl council serve`, the bot's
+council, which drives **OpenCode** as its Coder. It runs as a pod of its own on
+the bot's computer; the desktop of a bot is the plain `desktop` image above,
+unchanged. It is **amd64 only** (`make image` builds `desktop` for amd64 and
+arm64 unchanged), because the OpenCode, `kubectl` and `buildctl` binaries it
+carries are.
 
-The agent stage adds checksum-pinned: the terminal UI (2.1.319), `kubectl`
-1.34.13 and `buildctl` 0.25.1 (the bot's own `buildkitd` version). `tnctl` is
-built from the `teknoir/cli` commit `TNCTL_REF`; the Debian packages (`git`,
-`curl`, `jq`, `mosquitto-clients`, `python3-venv`, `python3-pip`,
-`python3-paho-mqtt`) are not pinned. `tnctl agent install` puts the Teknoir
-skills and the `teknoir-guard` hook in `/etc/claude-code` root-owned, and
-`managed-settings.json` there registers the hook and the permissions.
+It contains no Claude Code. The council stage adds checksum-pinned: OpenCode
+2.2.7 (the `linux-x64-baseline` build, which the bots' VMs need for their lack
+of AVX2), `kubectl` 1.34.13 and `buildctl` 0.25.1 (the bot's own `buildkitd`
+version). `tnctl` is built from the `teknoir/cli` commit `TNCTL_REF`, with
+Go 1.27.4. The Debian packages (`tini`, `git`, `curl`, `jq`, `ripgrep`,
+`ca-certificates`, `python3`, `python3-venv`, `python3-pip`,
+`python3-paho-mqtt`, `mosquitto-clients`, `openssh-client`, `less`, `procps`)
+are not pinned.
 
-`/usr/local/bin/teknoirbot-agent` is the launcher the autostart and the two
-menu entries run. It starts the agent on the platform's model with the bot's
-key (`TEKNOIRBOT_API`; the key never reaches a command line), and falls back to
-`--own-account`: the user's own Anthropic account, whose login lives on the
-memory volume (`/run/teknoirbot-own`) for that terminal only.
+- **OpenCode's configuration** is `/etc/teknoirbot/opencode.json`, root-owned
+  and mode 0644, so the container user can read it but not change the provider
+  it points at or the permissions: the provider is the platform's model proxy
+  (`{env:TEKNOIRBOT_API}/model/v1`, the key read from
+  `{file:/run/teknoirbot/key}`), sharing and updates are off, and the model's
+  effort variants are `low`, `medium` and `high`.
+- **The kit** is `/etc/teknoirbot/kit`, root-owned: `tnctl agent install
+  --agent opencode --managed` puts the Teknoir skills there, and the Coder
+  links each work directory's `.agents/skills` to
+  `/etc/teknoirbot/kit/skills`.
+- **The entrypoint** is `/usr/bin/tini -- tnctl council serve --work-dir
+  /work`, as uid/gid 1000 with `HOME` and the XDG directories under `/work`
+  (`/work/home`), the volume the pod mounts.
 
 `TNCTL_REF` has no default in the Makefile and must name a `teknoir/cli` commit
-with `tnctl agent install`; the Dockerfile's default ref predates it, so a
-plain `docker buildx build --target agent` fails at the kit step by design.
+with `tnctl council serve`; the Dockerfile's default ref predates it, so a
+plain `docker buildx build --target council` fails at the kit step by design.
+
+```sh
+make image-council TNCTL_REF=<40-hex commit>
+```
 
 ## Build and test
 
@@ -330,7 +347,7 @@ plain `docker buildx build --target agent` fails at the kit step by design.
 make test          # bash test/run.sh: the whole suite
 make lint          # shellcheck + hadolint
 make image         # docker buildx build --target desktop --platform linux/amd64,linux/arm64
-make image-agent   # the agent image, amd64: make image-agent TNCTL_REF=<commit>
+make image-council # the council image, amd64: make image-council TNCTL_REF=<commit>
 ```
 
 The test suite needs no docker and no root. It runs `shellcheck -x` over every
@@ -344,7 +361,11 @@ Singleton files are removed, checks the `index.html` redirect logic and
 `teknoir-notice.js` against a stand-in page with `node`, and runs
 `desktop-healthcheck` against a stand-in RFB server and a
 stand-in web server, including a server that refuses the connection the way a
-blacklisted Xvnc does.
+blacklisted Xvnc does. It checks the council image the same way, without
+docker: that the old agent image is gone, the stage and its parent, the
+OpenCode pin, the entrypoint, user and environment, every rule of
+`opencode.json`, and that `make image-council` refuses anything but a full
+`teknoir/cli` commit.
 
 The image is multi-arch (`linux/amd64`, `linux/arm64`). It is built only from
 Debian packages plus the noarch noVNC tarball (checksum-pinned), so there is no

@@ -4,7 +4,7 @@
 # Three rules are ignored, all deliberately:
 ignored:
   # DL3018: apk package versions are not pinned. The tnctl build stage is
-  # pinned by the digest of golang:1.26-alpine, and that image's apk index
+  # pinned by the digest of golang:1.27.4-alpine, and that image's apk index
   # only keeps the current version of git, so pinning a version in the
   # Dockerfile would break the build as soon as the index moves on. Same
   # reasoning as DL3008 below.
@@ -14,8 +14,8 @@ ignored:
   # package, so pinning a version in the Dockerfile would break the build as
   # soon as the archive moves on. The base image digest is the real pin.
   - DL3008
-  # DL3020: ADD with a remote URL. Used once, for the noVNC tarball, because
-  # ADD downloads it and RUN verifies NOVNC_SHA256 with sha256sum -c; with
-  # COPY the checksum could not be verified. (Docker recommends ADD for a
-  # remote archive with a checksum.)
+  # DL3020: ADD with a remote URL. Used for the noVNC, kubectl, buildkit and
+  # OpenCode downloads, because ADD fetches them and a RUN verifies each
+  # checksum with sha256sum -c; with COPY the checksum could not be verified.
+  # (Docker recommends ADD for a remote archive with a checksum.)
   - DL3020

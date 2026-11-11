@@ -1,3 +1,0 @@
-#!/bin/sh
-# The bot's key for the terminal UI's apiKeyHelper. Read from the file on every call; never on a command line.
-exec tr -d '[:space:]' <"${TNCTL_BOT_KEY_FILE:-/run/teknoirbot/key}"

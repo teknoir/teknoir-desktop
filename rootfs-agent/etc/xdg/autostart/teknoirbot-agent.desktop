@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=TeknoirBot agent, powered by Claude
-Comment=An AI agent for this bot, with the platform access its creator allowed
-Exec=xfce4-terminal --title "TeknoirBot agent" -e /usr/local/bin/teknoirbot-agent
-Icon=utilities-terminal
-Terminal=false
-X-GNOME-Autostart-enabled=true
