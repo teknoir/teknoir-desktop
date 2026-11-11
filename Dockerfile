@@ -295,12 +295,14 @@ RUN echo "${OPENCODE_SHA256}  /tmp/opencode.tgz" | sha256sum -c - \
 # The Teknoir kit: the skills, from tnctl's embedded copy, into the managed
 # directory the container user cannot write. The Coder links each work
 # directory's .agents/skills to /etc/teknoirbot/kit/skills. `--check` fails the
-# build if what was installed does not match what tnctl carries.
+# build if what was installed does not match what tnctl carries. Both name
+# OpenCode, the only agent in this image, so the kit holds only the skills
+# (no guard hook).
 #
 # A throwaway HOME keeps the build from writing /root/.tnctl.yaml into the
 # image: a first tnctl run creates its default configuration file.
 RUN HOME=/tmp/kit-home tnctl agent install --agent opencode --managed /etc/teknoirbot/kit \
- && HOME=/tmp/kit-home tnctl agent list --managed /etc/teknoirbot/kit --check \
+ && HOME=/tmp/kit-home tnctl agent list --agent opencode --managed /etc/teknoirbot/kit --check \
  && test -d /etc/teknoirbot/kit/skills \
  && rm -rf /tmp/kit-home
 

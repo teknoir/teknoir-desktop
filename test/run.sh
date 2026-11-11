@@ -2607,7 +2607,7 @@ test_council_dockerfile_managed() {
   stage="$(council_stage)"
   grep -qF 'tnctl agent install --agent opencode --managed /etc/teknoirbot/kit' <<<"$stage" ||
     problems+="the kit is not installed with --agent opencode --managed /etc/teknoirbot/kit; "
-  grep -qF 'tnctl agent list --managed /etc/teknoirbot/kit --check' <<<"$stage" ||
+  grep -qF 'tnctl agent list --agent opencode --managed /etc/teknoirbot/kit --check' <<<"$stage" ||
     problems+="the kit is not checked with --check; "
   grep -qF 'COPY rootfs-council/ /' <<<"$stage" ||
     problems+="rootfs-council is not copied into the image; "
