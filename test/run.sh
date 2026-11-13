@@ -268,6 +268,8 @@ if data.get("path") != "websockify":
     | grep -E '(^|[[:space:];&|(/])ln([[:space:]]|$)' \
     | sed -E 's/^[[:space:]]*(&&[[:space:]]*)?//; s/[[:space:]]*\\$//')"
   want_lns=$'ln -s /run/desktop/notice.json /opt/novnc/teknoir-notice.json\nln -s /usr/bin/Xtigervnc /usr/local/bin/Xvnc'
+  # ... and the council stage's, the versioned OpenCode's /usr/local/bin entry.
+  want_lns+=$'\nln -s /opt/opencode/${OPENCODE_VERSION}/opencode /usr/local/bin/opencode'
   if [ "$lns" != "$want_lns" ]; then
     problems+="the Dockerfile's ln commands are not exactly the notice and Xvnc links: '$(printf '%s' "$lns" | tr '\n' ';')'; "
   fi
@@ -2279,6 +2281,492 @@ PY
   REFUSE_HTTP_PID=""
 }
 
+# --- the council image ------------------------------------------------------
+
+# The TeknoirBot council: a headless image, with no desktop, that runs
+# `tnctl council serve`, which drives OpenCode as the Coder. A bot's desktop is
+# the plain desktop image, and there is no Claude Code anywhere.
+COUNCIL_CONFIG="rootfs-council/etc/teknoirbot/opencode.json"
+
+# The text of the Dockerfile's council stage: from its FROM line to the end of
+# the file. council is the last stage, which test_council_stage proves, so this
+# is the whole of it.
+council_stage() {
+  awk '/^FROM .* AS council$/{seen=1} seen' Dockerfile
+}
+
+# Claude Code is gone from every file this repository ships. The one exception
+# is the model ids in the config, which name the platform's models.
+test_council_no_claude() {
+  local f bad=""
+  for f in Dockerfile Makefile; do
+    if grep -qiF claude "$f"; then
+      bad+="$f; "
+    fi
+  done
+  while IFS= read -r f; do
+    grep -qiF claude "$f" || continue
+    if [ "$f" != "$COUNCIL_CONFIG" ]; then
+      bad+="$f; "
+    elif grep -oiE 'claude[a-z0-9.-]*' "$f" | grep -qvxE 'claude-(sonnet|haiku)-5-5'; then
+      bad+="$f outside the model ids; "
+    fi
+  done < <(find rootfs-council -type f -print)
+  if [ -z "$bad" ]; then
+    pass council-no-claude
+  else
+    fail council-no-claude "Claude is still in: $bad"
+  fi
+}
+
+# The launcher, the managed settings and the kit tree went with the stage.
+test_council_no_rootfs_agent() {
+  if [ -e rootfs-agent ]; then
+    fail council-no-rootfs-agent "rootfs-agent/ still exists: $(find rootfs-agent -type f | tr '\n' ' ')"
+  else
+    pass council-no-rootfs-agent
+  fi
+}
+
+test_council_stage() {
+  # shellcheck disable=SC2016 # ${DEBIAN_IMAGE} is the Dockerfile's, not ours
+  local problems="" want='FROM ${DEBIAN_IMAGE} AS council' last
+  # The slim Debian base, named exactly: a FROM desktop AS council would fail
+  # this line, and so would any other parent.
+  grep -qxF "$want" Dockerfile ||
+    problems+="the council stage is not '$want'; "
+  if grep -qE '^FROM .* AS agent$' Dockerfile; then
+    problems+="an agent stage still exists; "
+  fi
+  last="$(grep -E '^FROM ' Dockerfile | tail -n 1)"
+  [ "$last" = "$want" ] ||
+    problems+="the last stage is '$last', not the council; "
+  if [ -z "$problems" ]; then
+    pass council-stage
+  else
+    fail council-stage "$problems"
+  fi
+}
+
+# The Coder is pinned by version and by the digest of the asset it comes from.
+test_council_opencode_pin() {
+  local problems="" stage
+  stage="$(council_stage)"
+  grep -qxF 'ARG OPENCODE_VERSION=2.2.7' <<<"$stage" ||
+    problems+="OPENCODE_VERSION is not 2.2.7; "
+  grep -qxF 'ARG OPENCODE_SHA256=89a6cee227b54bc011179c528a5e63176032462b1a5e21723b616801cddc2ca7' <<<"$stage" ||
+    problems+="OPENCODE_SHA256 is not the v2.2.7 baseline digest; "
+  # shellcheck disable=SC2016 # these are the Dockerfile's variables
+  grep -qF 'https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64-baseline.tar.gz' <<<"$stage" ||
+    problems+="the download is not the versioned linux-x64-baseline tarball; "
+  # shellcheck disable=SC2016 # these are the Dockerfile's variables
+  grep -qF 'echo "${OPENCODE_SHA256}  /tmp/opencode.tgz" | sha256sum -c -' <<<"$stage" ||
+    problems+="the tarball is not checked with sha256sum -c; "
+  # shellcheck disable=SC2016 # ${OPENCODE_VERSION} is the Dockerfile's, not ours
+  grep -qF '/opt/opencode/${OPENCODE_VERSION}/opencode' <<<"$stage" ||
+    problems+="the binary is not unpacked under /opt/opencode/\${OPENCODE_VERSION}; "
+  # shellcheck disable=SC2016 # ${OPENCODE_VERSION} is the Dockerfile's, not ours
+  grep -qF 'ln -s /opt/opencode/${OPENCODE_VERSION}/opencode /usr/local/bin/opencode' <<<"$stage" ||
+    problems+="there is no /usr/local/bin/opencode link to it; "
+  grep -qF 'opencode --version' <<<"$stage" ||
+    problems+="the build does not run opencode --version; "
+  if [ -z "$problems" ]; then
+    pass council-opencode-pin
+  else
+    fail council-opencode-pin "$problems"
+  fi
+}
+
+# tnctl releases are built with Go 1.27.4 or later, so the toolchain that
+# builds tnctl may not be older.
+test_council_go_image() {
+  local problems="" image version
+  image="$(sed -n 's/^ARG GO_IMAGE=//p' Dockerfile)"
+  case "$image" in
+    docker.io/library/golang:*-alpine@sha256:*) ;;
+    *) problems+="GO_IMAGE is '${image:-unset}', not a golang:*-alpine image pinned by digest; " ;;
+  esac
+  version="${image#docker.io/library/golang:}"
+  version="${version%%-alpine*}"
+  if ! [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    problems+="GO_IMAGE's version '${version}' is not X.Y.Z; "
+  elif [ "$((BASH_REMATCH[1] * 10000 + BASH_REMATCH[2] * 100 + BASH_REMATCH[3]))" -lt 12704 ]; then
+    problems+="GO_IMAGE is Go $version, older than 1.27.4; "
+  fi
+  if [ -z "$problems" ]; then
+    pass council-go-image
+  else
+    fail council-go-image "$problems"
+  fi
+}
+
+# What the container starts as and with: the entrypoint, the user, and the
+# environment OpenCode reads its state directories from.
+test_council_runtime() {
+  local problems="" stage envs want_envs user
+  stage="$(council_stage)"
+  grep -qxF 'ENTRYPOINT ["/usr/bin/tini", "--", "tnctl", "council", "serve", "--work-dir", "/work"]' <<<"$stage" ||
+    problems+="the entrypoint is not tini -- tnctl council serve --work-dir /work; "
+  user="$(grep -E '^USER ' <<<"$stage" | tail -n 1)"
+  [ "$user" = 'USER 1000:1000' ] ||
+    problems+="the last USER of the stage is '${user:-none}'; "
+  # The ENV block, exactly: one added, dropped or pointed elsewhere would
+  # change where OpenCode keeps its sessions, state and cache.
+  envs="$(awk '/^ENV /{f=1} f{print} f && !/\\$/{exit}' <<<"$stage" |
+    tr -d "\\\\" | tr -s ' ' '\n' | grep -E '^[A-Z_]+=' | sort)"
+  want_envs="$(printf '%s\n' \
+    OPENCODE_CONFIG=/etc/teknoirbot/opencode.json \
+    OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+    HOME=/work/home \
+    XDG_DATA_HOME=/work/home/.local/share \
+    XDG_STATE_HOME=/work/home/.local/state \
+    XDG_CACHE_HOME=/work/home/.cache \
+    XDG_CONFIG_HOME=/etc/teknoirbot/xdg | sort)"
+  [ "$envs" = "$want_envs" ] ||
+    problems+="the ENV block is '$(printf '%s' "$envs" | tr '\n' ' ')'; "
+  if [ -z "$problems" ]; then
+    pass council-runtime
+  else
+    fail council-runtime "$problems"
+  fi
+}
+
+# The Coder's tools, the same list the image documents.
+test_council_packages() {
+  local problems="" stage p
+  stage="$(council_stage)"
+  for p in tini git curl jq ripgrep ca-certificates python3 python3-venv \
+    python3-pip python3-paho-mqtt mosquitto-clients openssh-client less procps; do
+    grep -qE "^[[:space:]]+${p}[[:space:]]+\\\\$" <<<"$stage" || problems+="$p is not installed; "
+  done
+  grep -qF -- 'apt-get install -y --no-install-recommends' <<<"$stage" ||
+    problems+="the apt install does not use --no-install-recommends; "
+  grep -qF 'rm -rf /var/lib/apt/lists/*' <<<"$stage" ||
+    problems+="the apt lists are left in the image; "
+  if [ -z "$problems" ]; then
+    pass council-packages
+  else
+    fail council-packages "$problems"
+  fi
+}
+
+# OpenCode's own configuration: it parses, and the shape the council's Coder
+# needs (one provider, no sharing, no updates).
+test_council_config_json() {
+  local problems=""
+  if ! python3 -I - "$COUNCIL_CONFIG" >"$TMP/council-config-json.out" 2>&1 <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    cfg = json.load(fh)
+
+problems = []
+if cfg.get("enabled_providers") != ["teknoir"]:
+    problems.append("enabled_providers is %r" % (cfg.get("enabled_providers"),))
+if cfg.get("share") != "disabled":
+    problems.append("share is %r" % (cfg.get("share"),))
+if cfg.get("update") != "disable":
+    problems.append("update is %r" % (cfg.get("update"),))
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    problems="$(tr '\n' '|' <"$TMP/council-config-json.out")"
+  fi
+  if [ -z "$problems" ]; then
+    pass council-config-json
+  else
+    fail council-config-json "$problems"
+  fi
+}
+
+# The model proxy and the bot's key, as the council's pod provides them.
+test_council_config_provider() {
+  local problems=""
+  if ! python3 -I - "$COUNCIL_CONFIG" >"$TMP/council-config-provider.out" 2>&1 <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    cfg = json.load(fh)
+
+provider = (cfg.get("providers") or {}).get("teknoir") or {}
+settings = provider.get("settings") or {}
+
+problems = []
+if settings.get("baseURL") != "{env:TEKNOIRBOT_API}/model/v1":
+    problems.append("baseURL is %r" % (settings.get("baseURL"),))
+if settings.get("apiKey") != "{file:/run/teknoirbot/key}":
+    problems.append("apiKey is %r" % (settings.get("apiKey"),))
+# The proxy labels each request's AUDIT line with the turn the Coder runs for.
+# OpenCode reads headers from settings.headers; options.headers is ignored.
+if settings.get("headers") != {"x-teknoir-turn": "{env:TEKNOIRBOT_TURN}"}:
+    problems.append("headers are %r" % (settings.get("headers"),))
+# With project configs off, a work directory's .agents/skills is not read: the
+# kit's skills are named here.
+if cfg.get("skills") != {"paths": ["/etc/teknoirbot/kit/skills"]}:
+    problems.append("skills is %r" % (cfg.get("skills"),))
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    problems="$(tr '\n' '|' <"$TMP/council-config-provider.out")"
+  fi
+  if [ -z "$problems" ]; then
+    pass council-config-provider
+  else
+    fail council-config-provider "$problems"
+  fi
+}
+
+# The permissions are last-match-wins: the allow-all rule first, then the
+# denies that the Coder must not be able to reach past. The effort variants
+# stop at high, the proxy's cap.
+test_council_config_permissions() {
+  local problems=""
+  if ! python3 -I - "$COUNCIL_CONFIG" >"$TMP/council-config-perms.out" 2>&1 <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    text = fh.read()
+cfg = json.loads(text)
+
+permissions = cfg.get("permissions") or []
+allow_all = {"action": "*", "resource": "*", "effect": "allow"}
+denied = [
+    {"action": "subagent", "resource": "*", "effect": "deny"},
+    {"action": "websearch", "resource": "*", "effect": "deny"},
+    {"action": "skill", "resource": "report", "effect": "deny"},
+    {"action": "skill", "resource": "opencode", "effect": "deny"},
+]
+models = ((cfg.get("providers") or {}).get("teknoir") or {}).get("models") or {}
+sonnet = models.get("claude-sonnet-5-5") or {}
+effort = (((sonnet.get("capabilities") or {}).get("reasoning") or {})
+          .get("effort"))
+
+problems = []
+if not permissions or permissions[0] != allow_all:
+    problems.append("the first permission is %r, not allow-all"
+                    % (permissions[0] if permissions else None,))
+for rule in denied:
+    if rule in permissions[1:]:
+        continue
+    if rule in permissions:
+        problems.append("the %s %s deny rule is before the allow-all rule"
+                        % (rule["action"], rule["resource"]))
+    else:
+        problems.append("no deny rule for %s %s"
+                        % (rule["action"], rule["resource"]))
+if effort != ["low", "medium", "high"]:
+    problems.append("the sonnet effort list is %r" % (effort,))
+# The proxy caps effort at high: neither name may appear anywhere in the file.
+if re.search(r"\b(max|xhigh)\b", text):
+    problems.append("the file names max or xhigh")
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    problems="$(tr '\n' '|' <"$TMP/council-config-perms.out")"
+  fi
+  if [ -z "$problems" ]; then
+    pass council-config-permissions
+  else
+    fail council-config-permissions "$problems"
+  fi
+}
+
+# The platform's MCP server, with Code Mode off: its tools go in the request as
+# teknoir_<tool>, not behind a search() inside JavaScript.
+test_council_config_mcp() {
+  local problems=""
+  if ! python3 -I - "$COUNCIL_CONFIG" >"$TMP/council-config-mcp.out" 2>&1 <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    cfg = json.load(fh)
+
+mcp = ((cfg.get("mcp") or {}).get("servers") or {}).get("teknoir") or {}
+
+problems = []
+if mcp.get("command") != ["tnctl", "mcp"]:
+    problems.append("the MCP command is %r" % (mcp.get("command"),))
+if mcp.get("codemode") is not False:
+    problems.append("codemode is %r, want false" % (mcp.get("codemode"),))
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    problems="$(tr '\n' '|' <"$TMP/council-config-mcp.out")"
+  fi
+  if [ -z "$problems" ]; then
+    pass council-config-mcp
+  else
+    fail council-config-mcp "$problems"
+  fi
+}
+
+# The kit and the config are root-owned in the image, so uid 1000 can neither
+# change the provider nor the permissions, and the config is 0644.
+test_council_dockerfile_managed() {
+  local problems="" stage
+  stage="$(council_stage)"
+  grep -qF 'tnctl agent install --agent opencode --managed /etc/teknoirbot/kit' <<<"$stage" ||
+    problems+="the kit is not installed with --agent opencode --managed /etc/teknoirbot/kit; "
+  grep -qF 'tnctl agent list --agent opencode --managed /etc/teknoirbot/kit --check' <<<"$stage" ||
+    problems+="the kit is not checked with --check; "
+  grep -qF 'COPY rootfs-council/ /' <<<"$stage" ||
+    problems+="rootfs-council is not copied into the image; "
+  grep -qF 'chown -R root:root /etc/teknoirbot' <<<"$stage" ||
+    problems+="/etc/teknoirbot is not root-owned; "
+  grep -qF 'chmod -R go-w /etc/teknoirbot' <<<"$stage" ||
+    problems+="/etc/teknoirbot is group-writable; "
+  grep -qF 'chmod 0644 /etc/teknoirbot/opencode.json' <<<"$stage" ||
+    problems+="opencode.json is not 0644; "
+  grep -qF 'install -d -o root -g root -m 0755 /etc/teknoirbot/xdg/opencode' <<<"$stage" ||
+    problems+="the read-only config home /etc/teknoirbot/xdg/opencode is not made root-owned; "
+  if [ -z "$problems" ]; then
+    pass council-dockerfile-managed
+  else
+    fail council-dockerfile-managed "$problems"
+  fi
+}
+
+# Each pinned binary is checked and installed in one layer, mode set by the
+# ADD/COPY itself: a separate chmod RUN would keep a second copy of the 259 MB
+# OpenCode binary in the image. The buildkit tarball stays in its own stage.
+test_council_dockerfile_layers() {
+  local problems="" stage path chmod_lines
+  stage="$(council_stage)"
+  # shellcheck disable=SC2016 # ${KUBECTL_VERSION} is the Dockerfile's, not ours
+  grep -qF 'ADD --chmod=0755 https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl' <<<"$stage" ||
+    problems+="the kubectl ADD does not carry --chmod=0755; "
+  grep -qF 'COPY --from=tnctl --chmod=0755 /out/tnctl /usr/local/bin/tnctl' <<<"$stage" ||
+    problems+="the tnctl COPY does not carry --chmod=0755; "
+  grep -qF 'COPY --from=buildctl --chmod=0755 /out/bin/buildctl /usr/local/bin/buildctl' <<<"$stage" ||
+    problems+="buildctl is not copied from its own stage; "
+  if grep -qE '^[[:space:]]*ADD[[:space:]].*buildkit' <<<"$stage"; then
+    problems+="the council stage adds the buildkit tarball itself; "
+  fi
+  # The chmod command, not the --chmod= option of an ADD or COPY. The chmod of
+  # the unpacked OpenCode binary is inside its RUN, where tar cannot set it.
+  chmod_lines="$(grep -vE '^[[:space:]]*#' <<<"$stage" |
+    grep -E '(^|[[:space:];&|(])chmod[[:space:]]')"
+  for path in /usr/local/bin/kubectl /usr/local/bin/tnctl /usr/local/bin/buildctl; do
+    if grep -qF "$path" <<<"$chmod_lines"; then
+      problems+="a RUN still chmods $path; "
+    fi
+  done
+  if [ -z "$problems" ]; then
+    pass council-dockerfile-layers
+  else
+    fail council-dockerfile-layers "$problems"
+  fi
+}
+
+# A FROM can only see the ARGs declared before the first FROM: an ARG inside a
+# stage is that stage's, and the base name of a later FROM using it is blank
+# (buildkit's --check fails with "base name (${GO_IMAGE}) should not be
+# blank"). Every $VAR a FROM uses must therefore be one of BuildKit's
+# predefined platform arguments or declared before the first FROM.
+test_council_dockerfile_from_args() {
+  local problems="" line n=0 var in_stage=0
+  local -A declared=(
+    [BUILDPLATFORM]=1 [TARGETPLATFORM]=1 [TARGETARCH]=1 [TARGETOS]=1
+    [BUILDARCH]=1 [BUILDOS]=1
+  )
+  while IFS= read -r line; do
+    n=$((n + 1))
+    case "$line" in
+      FROM\ *)
+        in_stage=1
+        # One line of output per variable: mapfile, not read -a (one line).
+        # shellcheck disable=SC2016 # these are the Dockerfile's variables
+        mapfile -t vars < <(grep -oE '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?' <<<"$line" |
+          tr -d '${}')
+        for var in "${vars[@]}"; do
+          [ -n "${declared[$var]:-}" ] ||
+            problems+="line $n: FROM uses \$$var, which no ARG before the first FROM declares; "
+        done
+        ;;
+      ARG\ *)
+        if [ "$in_stage" = 0 ]; then
+          var="${line#ARG }"
+          var="${var%%=*}"
+          var="${var%% *}"
+          declared[$var]=1
+        fi
+        ;;
+    esac
+  done <Dockerfile
+  if [ -z "$problems" ]; then
+    pass council-dockerfile-from-args
+  else
+    fail council-dockerfile-from-args "$problems"
+  fi
+}
+
+# The council image's tnctl ref: a branch or a tag would be fetched as it is,
+# and BuildKit's cache would keep the first commit it ever fetched. The
+# Makefile refuses anything but the full commit, before docker runs.
+test_council_makefile() {
+  local bindir="$TMP/council-make-bin" docker_log="$TMP/council-make-docker.log" rc out
+  local full=0123456789abcdef0123456789abcdef01234567
+  mkdir -p "$bindir"
+  printf '#!/bin/sh\nprintf "docker %%s\\n" "$*" >>"%s"\n' "$docker_log" >"$bindir/docker"
+  chmod 0755 "$bindir/docker"
+  : >"$docker_log"
+
+  # 1. No TNCTL_REF at all: the message names the commit the image needs, and
+  #    docker is never called.
+  out="$(env -i PATH="$bindir:$TEST_PATH" make image-council 2>&1)"
+  rc=$?
+  if [ "$rc" != 0 ] && [ ! -s "$docker_log" ] &&
+    [[ "$out" == *"set TNCTL_REF to the teknoir/cli commit with 'tnctl council serve'"* ]]; then
+    pass council-makefile-no-ref
+  else
+    fail council-makefile-no-ref "exit $rc, docker called: $([ -s "$docker_log" ] && echo yes || echo no), output '$(tr '\n' '|' <<<"$out")'"
+  fi
+
+  # 2. A branch name is not the commit: fetch would take whatever it points at
+  #    now, and BuildKit's cache would keep the first one.
+  : >"$docker_log"
+  out="$(env -i PATH="$bindir:$TEST_PATH" make image-council TNCTL_REF=main 2>&1)"
+  rc=$?
+  if [ "$rc" != 0 ] && [ ! -s "$docker_log" ] &&
+    [[ "$out" == *"TNCTL_REF must be a full 40-character teknoir/cli commit"* ]]; then
+    pass council-makefile-ref-not-a-commit
+  else
+    fail council-makefile-ref-not-a-commit "exit $rc, docker called: $([ -s "$docker_log" ] && echo yes || echo no), output '$(tr '\n' '|' <<<"$out")'"
+  fi
+
+  # 3. The full commit: the build is the council target, amd64 only, with both
+  #    build args and the dev-council tag.
+  out="$(env -i PATH="$TEST_PATH" make -n image-council TNCTL_REF="$full" 2>&1)"
+  rc=$?
+  if [ "$rc" = 0 ] &&
+    grep -qF 'docker buildx build --target council --platform linux/amd64' <<<"$out" &&
+    grep -qF -- "--build-arg TNCTL_REF=$full" <<<"$out" &&
+    grep -qF -- '--build-arg TNCTL_VERSION=dev' <<<"$out" &&
+    grep -qF -- '-t ghcr.io/teknoir/teknoir-desktop:dev-council' <<<"$out"; then
+    pass council-makefile-build
+  else
+    fail council-makefile-build "exit $rc, output '$(tr '\n' '|' <<<"$out")'"
+  fi
+
+  # 4. The old target is gone, not an alias for this one.
+  out="$(env -i PATH="$TEST_PATH" make image-agent 2>&1)"
+  rc=$?
+  if [ "$rc" != 0 ] && [[ "$out" == *"No rule to make target"* ]]; then
+    pass council-makefile-no-image-agent
+  else
+    fail council-makefile-no-image-agent "exit $rc, output '$(tr '\n' '|' <<<"$out")'"
+  fi
+}
+
 # --- run --------------------------------------------------------------------
 
 test_shellcheck
@@ -2303,6 +2791,21 @@ test_notice_script
 test_healthcheck
 test_healthcheck_bad_http
 test_healthcheck_blacklisted
+test_council_no_claude
+test_council_no_rootfs_agent
+test_council_stage
+test_council_opencode_pin
+test_council_go_image
+test_council_runtime
+test_council_packages
+test_council_config_json
+test_council_config_provider
+test_council_config_permissions
+test_council_config_mcp
+test_council_dockerfile_managed
+test_council_dockerfile_layers
+test_council_dockerfile_from_args
+test_council_makefile
 
 printf '\n%d passed, %d failed, %d skipped\n' "$passed" "$failed" "$skipped"
 if [ "$failed" -ne 0 ]; then

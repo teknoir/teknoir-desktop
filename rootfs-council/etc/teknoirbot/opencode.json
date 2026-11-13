@@ -1,0 +1,99 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "teknoir/claude-sonnet-5-5",
+  "small_model": "teknoir/claude-haiku-5-5",
+  "share": "disabled",
+  "update": "disable",
+  "snapshots": false,
+  "enabled_providers": [
+    "teknoir"
+  ],
+  "plugins": [],
+  "skills": {
+    "paths": [
+      "/etc/teknoirbot/kit/skills"
+    ]
+  },
+  "permissions": [
+    {
+      "action": "*",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "subagent",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "websearch",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "skill",
+      "resource": "report",
+      "effect": "deny"
+    },
+    {
+      "action": "skill",
+      "resource": "opencode",
+      "effect": "deny"
+    }
+  ],
+  "providers": {
+    "teknoir": {
+      "name": "Teknoir",
+      "package": "@opencode/ai/providers/anthropic-compatible",
+      "settings": {
+        "baseURL": "{env:TEKNOIRBOT_API}/model/v1",
+        "apiKey": "{file:/run/teknoirbot/key}",
+        "headers": {
+          "x-teknoir-turn": "{env:TEKNOIRBOT_TURN}"
+        }
+      },
+      "models": {
+        "claude-sonnet-5-5": {
+          "compatibility": {
+            "supportsThinkingBlockBinding": false
+          },
+          "settings": {
+            "effort": "high"
+          },
+          "capabilities": {
+            "reasoning": {
+              "supported": true,
+              "effort": [
+                "low",
+                "medium",
+                "high"
+              ]
+            }
+          }
+        },
+        "claude-haiku-5-5": {
+          "compatibility": {
+            "supportsThinkingBlockBinding": false
+          },
+          "capabilities": {
+            "reasoning": {
+              "supported": false
+            }
+          }
+        }
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "teknoir": {
+        "type": "local",
+        "command": [
+          "tnctl",
+          "mcp"
+        ],
+        "codemode": false
+      }
+    }
+  }
+}

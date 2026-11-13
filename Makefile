@@ -3,6 +3,7 @@
 #   make test           the whole test suite (no docker, no root)
 #   make lint           shellcheck, hadolint and the config file checks
 #   make image          multi-arch build of ghcr.io/teknoir/teknoir-desktop:dev
+#   make image-council  amd64 build of the council image, :dev-council
 #   make seccomp        regenerate deploy/seccomp/teknoir-desktop.json
 #   make seccomp-check  verify that it is up to date
 #
@@ -11,7 +12,14 @@
 IMAGE ?= ghcr.io/teknoir/teknoir-desktop
 TMP ?= $(or $(TMPDIR),/var/tmp)/teknoir-desktop-seccomp
 
-.PHONY: test lint image seccomp seccomp-check
+# The council image embeds tnctl, built from this commit of teknoir/cli. It has
+# no default on purpose: the cli commit has to be the one with
+# `tnctl council serve`, and a stale default would build an image whose kit
+# step fails, or worse, one that passes with an old kit.
+TNCTL_REF ?=
+TNCTL_VERSION ?= dev
+
+.PHONY: test lint image image-council seccomp seccomp-check
 
 test:
 	bash test/run.sh
@@ -24,7 +32,25 @@ lint:
 # (`docker buildx create --use --name teknoir-multiarch`), and the push is
 # skipped: the image stays in the local build cache.
 image:
-	docker buildx build --platform linux/amd64,linux/arm64 -t $(IMAGE):dev .
+	docker buildx build --target desktop --platform linux/amd64,linux/arm64 -t $(IMAGE):dev .
+
+# The council image is amd64 only (the OpenCode, kubectl and buildctl binaries
+# it carries are), and its kit comes from tnctl, so TNCTL_REF must name the cli
+# commit that has `tnctl council serve`. It must be the full commit, not a
+# branch or a tag: the tnctl stage fetches exactly that name, and a moving name
+# would keep the first commit BuildKit cached, silently.
+image-council:
+	@if [ -z "$(TNCTL_REF)" ]; then \
+	  echo "make image-council: set TNCTL_REF to the teknoir/cli commit with 'tnctl council serve', e.g. make image-council TNCTL_REF=<40-hex commit>" >&2; \
+	  exit 1; \
+	fi
+	@if ! printf '%s' "$(TNCTL_REF)" | grep -qxE '[0-9a-f]{40}'; then \
+	  echo "make image-council: TNCTL_REF must be a full 40-character teknoir/cli commit" >&2; \
+	  exit 1; \
+	fi
+	docker buildx build --target council --platform linux/amd64 \
+	  --build-arg TNCTL_REF=$(TNCTL_REF) --build-arg TNCTL_VERSION=$(TNCTL_VERSION) \
+	  -t $(IMAGE):dev-council .
 
 # The seccomp profile: containerd's RuntimeDefault per architecture, merged and
 # extended with the chroot/clone/unshare rule Chromium's sandbox needs. The

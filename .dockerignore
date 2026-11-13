@@ -1,6 +1,6 @@
-# Build context for the teknoir-desktop image. The image only needs the
-# rootfs tree; everything else is documentation, tests or host-side files that
-# would only churn the build cache.
+# Build context for the teknoir-desktop images. The images only need the rootfs
+# and rootfs-council trees; everything else is documentation, tests or
+# host-side files that would only churn the build cache.
 
 .git
 .github
