@@ -10,3 +10,4 @@
 /dist/
 *.log
 test/tmp/
+.test-logs/
