@@ -15,6 +15,23 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# Under a coding agent (CLAUDECODE, AI_AGENT unless 0/false/no/off, Codex) the
+# suite prints only failures, skips and the totals; the full output goes to the
+# git-ignored .test-logs/. Humans and CI keep the full output.
+is_agent() {
+  case "${AI_AGENT:-}" in 0 | false | no | off) return 1 ;; "") ;; *) return 0 ;; esac
+  [ -n "${CLAUDECODE:-}${CODEX_THREAD_ID:-}${CODEX_SANDBOX:-}" ]
+}
+if [ -z "${TEST_RUN_FULL:-}" ] && is_agent; then
+  mkdir -p .test-logs
+  log=".test-logs/test-$(date +%Y%m%d-%H%M%S).log"
+  TEST_RUN_FULL=1 NO_COLOR=1 bash "$ROOT/test/run.sh" "$@" >"$log" 2>&1
+  rc=$?
+  grep -v -e '^PASS ' -e '^$' "$log"
+  echo "exit=$rc full log: $log"
+  exit "$rc"
+fi
+
 ENTRYPOINT="rootfs/usr/local/bin/desktop-entrypoint"
 BROWSER="rootfs/usr/local/bin/desktop-browser"
 HEALTHCHECK="rootfs/usr/local/bin/desktop-healthcheck"
