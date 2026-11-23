@@ -1,0 +1,23 @@
+# CI v4 (teknoir/ci-workflows): the repo's test suite (no docker, no root) and shellcheck.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  test:
+    uses: teknoir/ci-workflows/.github/workflows/test.yml@main
+    with:
+      runs-on: ubuntu-latest
+      command: make test && shellcheck -x rootfs/usr/local/bin/* host/* test/*.sh
+    permissions:
+      contents: read

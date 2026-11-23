@@ -1,0 +1,49 @@
+# CI v4 (teknoir/ci-workflows): public images, built on a hosted runner from main (sha-<8>) and
+# from v* tags on main. Replaces the dev-host script ~/.config/teknoir/local-ci/teknoir-desktop.sh.
+name: image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: image-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  # ghcr.io/teknoir/teknoir-desktop:sha-<8>, multi-arch (devices are arm64 Jetsons and Pis).
+  desktop:
+    uses: teknoir/ci-workflows/.github/workflows/image.yml@main
+    with:
+      image: teknoir-desktop
+      target: desktop
+      platforms: linux/amd64,linux/arm64
+      visibility: public
+      runs-on: ubuntu-latest
+      timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+  # ghcr.io/teknoir/teknoir-desktop/council:sha-<8>, amd64 only (OpenCode, kubectl and buildctl
+  # are linux-x64). TNCTL_REF is the full teknoir/cli commit whose tnctl has `council serve`
+  # (never a branch or tag: BuildKit would cache the first commit it fetched); TNCTL_VERSION is
+  # what `tnctl --version` prints (the cli tag without its v). Bump both here in a PR.
+  council:
+    uses: teknoir/ci-workflows/.github/workflows/image.yml@main
+    with:
+      image: teknoir-desktop/council
+      target: council
+      platforms: linux/amd64
+      build-args: |
+        TNCTL_REF=8bdae2f59ccafa712b90821af9a8dd32dcf2a108
+        TNCTL_VERSION=0.3.0-rc.5
+      visibility: public
+      runs-on: ubuntu-latest
+      timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
