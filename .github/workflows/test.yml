@@ -1,4 +1,4 @@
-# CI v4 (teknoir/ci-workflows): the repo's test suite (no docker, no root) and shellcheck.
+# CI v4 (teknoir/ci-workflows): the repo's test suite (no docker, no root; includes shellcheck).
 name: test
 
 on:
@@ -18,6 +18,6 @@ jobs:
     uses: teknoir/ci-workflows/.github/workflows/test.yml@main
     with:
       runs-on: ubuntu-latest
-      command: make test && shellcheck -x rootfs/usr/local/bin/* host/* test/*.sh
+      command: make test
     permissions:
       contents: read
