@@ -329,6 +329,7 @@ stop_children() {
 }
 
 # shellcheck disable=SC2317 # run from the TERM/INT trap
+# shellcheck disable=SC2329 # invoked by the trap below
 on_term() {
   log "received a termination signal, stopping children"
   stop_children
