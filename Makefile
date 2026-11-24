@@ -4,6 +4,7 @@
 #   make lint           shellcheck, hadolint and the config file checks
 #   make theme          regenerate the xfwm4 theme from tools/gen-xfwm4-theme.py
 #   make theme-check    verify the committed xfwm4 theme matches the generator
+#   make host-bundle    write the host-mode bundle for the ansible role (OUT=...)
 #   make image          multi-arch build of ghcr.io/teknoir/teknoir-desktop:dev
 #   make image-council  amd64 build of the council image, :dev-council
 #   make seccomp        regenerate deploy/seccomp/teknoir-desktop.json
@@ -21,7 +22,7 @@ TMP ?= $(or $(TMPDIR),/var/tmp)/teknoir-desktop-seccomp
 TNCTL_REF ?=
 TNCTL_VERSION ?= dev
 
-.PHONY: test lint theme theme-check image image-council seccomp seccomp-check
+.PHONY: test lint theme theme-check host-bundle image image-council seccomp seccomp-check
 
 test:
 	bash test/run.sh
@@ -38,6 +39,18 @@ theme:
 
 theme-check:
 	python3 -I tools/gen-xfwm4-theme.py --check rootfs/usr/share/themes/Teknoir/xfwm4
+
+# The host-mode bundle the teknoir/ansible desktop playbook vendors: the
+# session script and unit, the theme files and the pinned fonts, with SOURCE
+# and SHA256SUMS. OUT is the ansible repository's
+# playbooks/files/teknoir-desktop; the tool refuses a directory with anything
+# of its own in it.
+host-bundle:
+	@if [ -z "$(OUT)" ]; then \
+	  echo "make host-bundle: set OUT to the bundle directory, e.g. make host-bundle OUT=<ansible>/playbooks/files/teknoir-desktop" >&2; \
+	  exit 1; \
+	fi
+	python3 -I tools/host-bundle.py --out "$(OUT)"
 
 # buildx with two platforms needs a builder that supports them
 # (`docker buildx create --use --name teknoir-multiarch`), and the push is

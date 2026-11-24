@@ -14,8 +14,8 @@
 # There is nothing to merge from the outside - the old values were written, not
 # defaulted - so this drops them once, before the session starts:
 #
-# - the theme, title, font, workspace-name and shadow properties of the xfwm4
-#   channel;
+# - the theme, title, font, workspace-name, workspace-count and shadow
+#   properties of the xfwm4 channel;
 # - the theme, icon, font, cursor, button-layout and Xft properties of the
 #   xsettings channel;
 # - the whole backdrop subtree of the xfce4-desktop channel (the image's
@@ -28,10 +28,14 @@
 # - Chromium's client-side frame flag, which a profile seeded by an older image
 #   has as true.
 #
+# The workspace count goes with the names: the theme names two workspaces "1"
+# and "2", and Ubuntu's stock user copy has a count of 4, so keeping the count
+# would leave the pager showing "1 2 Workspace 3 Workspace 4".
+#
 # Everything else in those files stays, byte for byte when nothing matched: a
-# window position, a workspace count, a double-click time are the user's, not
-# the theme's. The panel and the window manager go back to the image's layout,
-# a manual window-manager or panel tweak on that desktop is lost once.
+# window position, a double-click time are the user's, not the theme's. The
+# panel and the window manager go back to the image's layout, a manual
+# window-manager or panel tweak on that desktop is lost once.
 #
 # It runs in two phases, because this is the user's data and a start that fails
 # must not eat more of it:
@@ -56,6 +60,15 @@
 # migrated and later starts skip the whole script. Delete that file and
 # restart the pod to run it again (the README says so in "Theme").
 #
+# It also runs on a host-mode device: the host session script
+# (host/teknoir-desktop-session) starts it as the device's login user when
+# TEKNOIR_DESKTOP_THEME=teknoir, with HOME set by systemd, before the XFCE
+# session and therefore before xfconfd reads the user's copies. The device may
+# run Python 3.8 (Ubuntu 20.04, JetPack 5), so the program below stays
+# 3.8-compatible. Its Chromium step only touches the image's own profile,
+# ~/.config/chromium-desktop; a device user's Chromium profile lives elsewhere
+# and is never read or written.
+#
 # The desktop never depends on this: the entrypoint calls it with `|| log`,
 # and on any failure (a malformed file, a read-only home) the script logs one
 # warning and leaves the marker unwritten, so the next start tries again. The
@@ -73,8 +86,9 @@ fail() {
   exit 1
 }
 
-# HOME is set by the image (ENV HOME=/home/desktop); the fallback is there so
-# the script is testable and can never write into an empty path.
+# HOME is set by the image (ENV HOME=/home/desktop) or by systemd on a
+# host-mode device; the fallback is there so the script is testable and can
+# never write into an empty path.
 H="${HOME:-/home/desktop}"
 C="$H/.config"
 X="$C/xfce4/xfconf/xfce-perchannel-xml"
@@ -111,6 +125,12 @@ fi
 # spaces and xfconfd writes those bytes raw and means them; ElementTree writes
 # them back as &#09;/&#10;/&#13;, so the value round-trips. A value never holds
 # a raw '"', so every ="..." in the file is one attribute.
+#
+# A CR needs one more step: on Python 3.8 (Ubuntu 20.04, JetPack 5)
+# ElementTree writes a CR in an attribute value as &#10; - as a newline - and
+# 3.10 and later as &#13;. So every CR is swapped for a private-use character
+# that the file does not contain before the serialisation, and that character
+# is swapped for &#13; after it: the same bytes come out on every version.
 changed=""
 if ! changed="$(python3 -I -c '
 import json
@@ -132,6 +152,7 @@ CHANNELS = (
         "/general/title_alignment",
         "/general/button_layout",
         "/general/workspace_names",
+        "/general/workspace_count",
         "/general/show_dock_shadow",
         "/general/show_frame_shadow",
         "/general/show_popup_shadow",
@@ -186,6 +207,40 @@ def keep_attribute_whitespace(text):
     return re.sub("=\"[^\"]*\"", refs, text)
 
 
+def cr_sentinel(text):
+    # The first private-use character (U+E000 upwards) that does not occur in
+    # the file: the value stands in for a CR through the serialisation.
+    code = 0xE000
+    while chr(code) in text:
+        code += 1
+    return chr(code)
+
+
+def indent_tree(node, level=0, space="  "):
+    # ET.indent() is Python 3.9+, and a host-mode device may run 3.8. This
+    # writes the same bytes: the root element itself is left alone, the text
+    # of an element opens the indentation of its children, and the last child
+    # is dedented back to the level of its parent.
+    if not len(node):
+        return
+
+    def walk(elem, level):
+        pad = "\n" + level * space
+        child_pad = pad + space
+        if not elem.text or not elem.text.strip():
+            elem.text = child_pad
+        last = None
+        for last in elem:
+            if len(last):
+                walk(last, level + 1)
+            if not last.tail or not last.tail.strip():
+                last.tail = child_pad
+        if last is not None and not last.tail.strip():
+            last.tail = pad
+
+    walk(node, level)
+
+
 def write_atomic(path, data, mode):
     target = os.path.realpath(path)
     directory = os.path.dirname(target) or "."
@@ -226,7 +281,8 @@ def plan_channel(path, wanted):
     # matched: such a file is never rewritten.
     with open(path, "rb") as fh:
         raw = fh.read()
-    root = ET.fromstring(keep_attribute_whitespace(raw.decode("utf-8")))
+    text = raw.decode("utf-8")
+    root = ET.fromstring(keep_attribute_whitespace(text))
     found = []
 
     def walk(node, prefix):
@@ -248,8 +304,14 @@ def plan_channel(path, wanted):
     for node in root.iter():
         if len(node) == 0 and node.text is not None and not node.text.strip():
             node.text = None
-    ET.indent(root, space="  ")
+    indent_tree(root)
+    sentinel = cr_sentinel(text)
+    for node in root.iter():
+        for key, value in list(node.attrib.items()):
+            if "\r" in value:
+                node.set(key, value.replace("\r", sentinel))
     body = ET.tostring(root, encoding="unicode")
+    body = body.replace(sentinel, "&#13;")
     data = ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
             + body + "\n").encode("utf-8")
     return data, removed

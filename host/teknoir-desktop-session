@@ -19,6 +19,17 @@
 # The host needs the `xauth` package (the cookie) and `dbus-x11` (the
 # `dbus-launch` the session runs under), Debian/Ubuntu package names.
 #
+# TEKNOIR_DESKTOP_THEME (default none; the ansible desktop playbook sets
+# teknoir) themes only this remote session. For XFCE it puts
+# /usr/local/share/teknoir-desktop/xdg first in XDG_CONFIG_DIRS - an
+# environment variable of the session, so nothing system-wide changes - and
+# runs the image's one-time desktop-theme-migrate in the user's home, because
+# the xfconf copies in ~/.config would otherwise win over those defaults.
+# The migration is skipped while a local XFCE session of the same user runs
+# (its xfconfd would write the old values back). A session that is not XFCE
+# gets GTK_THEME=Teknoir (colours only); the device's own local sessions are
+# untouched.
+#
 # Installed to /usr/local/libexec/teknoir-desktop-session by an Ansible role;
 # this file documents it, it is not installed by the image.
 #
@@ -59,6 +70,46 @@ if [ ${#session_cmd[@]} -eq 0 ]; then
   exit 78 # EX_CONFIG: not restartable, see RestartPreventExitStatus
 fi
 log "using desktop session: ${session_cmd[*]}"
+
+# The theme switch, before Xvnc so the session it starts sees the variables.
+# The two paths can be overridden for the tests; on a device they are the
+# ansible desktop playbook's locations.
+theme="${TEKNOIR_DESKTOP_THEME:-none}"
+case "$theme" in
+  none) ;;
+  teknoir)
+    if [ "${session_cmd[0]}" = startxfce4 ]; then
+      theme_xdg="${TEKNOIR_DESKTOP_THEME_XDG:-/usr/local/share/teknoir-desktop/xdg}"
+      theme_migrate="${TEKNOIR_DESKTOP_THEME_MIGRATE:-/usr/local/libexec/teknoir-desktop-theme-migrate}"
+      if [ ! -d "$theme_xdg" ]; then
+        log "theme teknoir: ${theme_xdg} is missing; the desktop starts unthemed"
+      else
+        export XDG_CONFIG_DIRS="${theme_xdg}:${XDG_CONFIG_DIRS:-/etc/xdg}"
+        # The migration never stops the desktop: it rewrites the user's own
+        # xfconf copies once, and a failure there only means the user copies
+        # keep winning over the theme defaults. It does wait, though, while a
+        # local XFCE session of the same user is running: that session's
+        # xfconfd would write its in-memory values back over the migrated
+        # files while the marker already says the work is done.
+        if command -v pgrep >/dev/null 2>&1 &&
+          pgrep -u "$(id -u)" -x xfconfd >/dev/null; then
+          log "theme teknoir: an XFCE session of this user is already running (xfconfd); the migration waits for a start without one"
+        elif [ -x "$theme_migrate" ]; then
+          "$theme_migrate" || log "theme migration failed; the desktop starts anyway"
+        else
+          log "theme teknoir: ${theme_migrate} is missing; skipping the migration"
+        fi
+        log "theme teknoir: XFCE defaults from ${theme_xdg}"
+      fi
+    else
+      export GTK_THEME=Teknoir
+      log "theme teknoir: GTK colours only for ${session_cmd[0]} (full theme needs XFCE)"
+    fi
+    ;;
+  *)
+    log "ignoring TEKNOIR_DESKTOP_THEME=${theme} (teknoir or none)"
+    ;;
+esac
 
 # Prefer Xtigervnc (the Debian/Ubuntu name; there /usr/bin/Xvnc is an
 # update-alternatives link that TightVNC or RealVNC may own). Fall back to

@@ -1561,9 +1561,9 @@ test_theme_migrate() {
       <value type="string" value="Workspace 1"/>
       <value type="string" value="Workspace 2"/>
     </property>
-    <property name="workspace_count" type="int" value="2"/>
+    <property name="workspace_count" type="int" value="4"/>
     <property name="focus_delay" type="int" value="250"/>
-    <property name="snap_width" type="string" value="10&#9;tab&#10;line"/>
+    <property name="snap_width" type="string" value="10&#9;tab&#10;line&#13;cr"/>
     <property name="keys" type="array">
       <value type="string" value="x"/>
       <value type="int" value="7"/>
@@ -1622,7 +1622,7 @@ EOF
     problems+="the log went to stdout: $(tr '\n' '|' <"$work/old.out"); "
   fi
   cat >"$work/old.expected" <<'EOF'
-desktop-theme-migrate: removed 5 settings from xfwm4.xml
+desktop-theme-migrate: removed 6 settings from xfwm4.xml
 desktop-theme-migrate: removed 1 setting from xsettings.xml
 desktop-theme-migrate: removed 1 setting from xfce4-desktop.xml
 desktop-theme-migrate: removed 1 setting from xfce4-terminal.xml
@@ -1669,8 +1669,9 @@ def expect(label, gone, kept):
 
 expect("xfwm4.xml",
        ["/general/theme", "/general/title_font", "/general/button_layout",
-        "/general/title_alignment", "/general/workspace_names"],
-       ["/general/workspace_count", "/general/focus_delay"])
+        "/general/title_alignment", "/general/workspace_names",
+        "/general/workspace_count"],
+       ["/general/focus_delay"])
 expect("xsettings.xml", ["/Net/ThemeName"], ["/Net/DoubleClickTime"])
 expect("xfce4-desktop.xml",
        ["/backdrop", "/backdrop/workspace0", "/backdrop/workspace0/image-style",
@@ -1696,9 +1697,8 @@ def props(label):
 # The kept properties keep their values, not just their keys: a rewrite that
 # dropped an attribute would still pass the path check above.
 for label, name, want in [
-        ("xfwm4.xml", "/general/workspace_count", "2"),
         ("xfwm4.xml", "/general/focus_delay", "250"),
-        ("xfwm4.xml", "/general/snap_width", "10\ttab\nline"),
+        ("xfwm4.xml", "/general/snap_width", "10\ttab\nline\rcr"),
         ("xsettings.xml", "/Net/DoubleClickTime", "400"),
         ("xfce4-desktop.xml", "/desktop-icons/style", "2"),
         ("xfce4-terminal.xml", "/misc-confirm-close", "true")]:
@@ -1708,6 +1708,15 @@ for label, name, want in [
     if prop.get("value") != want:
         problems.append("%s: %s is %r, want %r"
                         % (label, name, prop.get("value"), want))
+
+# A kept attribute value with a CR writes back as &#13; on every Python: 3.8
+# would otherwise turn it into a newline (&#10;). The tab and the newline next
+# to it are the references ElementTree always writes.
+with open(xml_dir + "/xfwm4.xml", "rb") as fh:
+    xfwm4_bytes = fh.read()
+if b'value="10&#09;tab&#10;line&#13;cr"' not in xfwm4_bytes:
+    problems.append("the CR in snap_width did not round-trip: %r"
+                    % (xfwm4_bytes,))
 
 keys = props("xfwm4.xml").get("/general/keys")
 if keys is not None:
@@ -1809,8 +1818,8 @@ EOF
 
 <channel name="xfwm4" version="1.0">
   <property name="general" type="empty">
-    <property name="workspace_count" type="int" value="2"/>
     <property name="focus_delay" type="int" value="250"/>
+    <property name="double_click_distance" type="int" value="5"/>
   </property>
 </channel>
 EOF
@@ -2154,6 +2163,184 @@ PY
     pass theme-migrate-empty-parent
   else
     fail theme-migrate-empty-parent "$problems"
+  fi
+
+  # 12. The CR fix, on Python 3.8's serialiser. A current Python already writes
+  # a CR in an attribute as &#13;, so the fixture above passes even with the
+  # sentinel code deleted; 3.8 writes it as &#10; (a newline) instead. The
+  # program is taken from the script and run in-process with 3.8's
+  # _escape_attrib in place, and its bytes must equal the ones the running
+  # Python writes: the same bytes on every version, CR, CRLF, tab and LF in a
+  # kept attribute. The program is also checked for ET.indent, which 3.8 lacks.
+  if python3 -I - "$MIGRATE" "$work/cr" >"$work/cr.out" 2>&1 <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+script_path, work = sys.argv[1], sys.argv[2]
+with open(script_path, encoding="utf-8") as fh:
+    script = fh.read()
+
+# The inline program, taken from the script exactly as bash passes it to
+# python3 -c: between the opening quote and the quote that closes it.
+marker = "python3 -I -c '"
+start = script.find(marker)
+if start < 0:
+    sys.exit("the migration runs no inline python3 -c program")
+start += len(marker)
+if script[start] != "\n":
+    sys.exit("the inline program does not start on its own line")
+start += 1
+end = script.find("\n' \"", start)
+if end < 0:
+    sys.exit("the inline program has no closing quote line")
+program = script[start:end]
+
+problems = []
+# A call, not a mention: the program's own comment names ET.indent() to say
+# why it does not use it, so comment-only lines are skipped.
+code_lines = [line for line in program.splitlines()
+              if not line.lstrip().startswith("#")]
+if any(".indent(" in line for line in code_lines):
+    problems.append("the inline program calls .indent(, which Python 3.8 lacks")
+
+
+def escape_attrib_38(text):
+    """CPython 3.8's xml.etree.ElementTree._escape_attrib."""
+    if "&" in text:
+        text = text.replace("&", "&amp;")
+    if "<" in text:
+        text = text.replace("<", "&lt;")
+    if ">" in text:
+        text = text.replace(">", "&gt;")
+    if "\"" in text:
+        text = text.replace("\"", "&quot;")
+    if "\r\n" in text:
+        text = text.replace("\r\n", "\n")
+    if "\r" in text:
+        text = text.replace("\r", "\n")
+    if "\n" in text:
+        text = text.replace("\n", "&#10;")
+    if "\t" in text:
+        text = text.replace("\t", "&#09;")
+    return text
+
+
+# A channel file as xfconfd writes it: a property the theme drops, and kept
+# properties whose values hold a CR, a CRLF, a tab and an LF.
+FIXTURE = """<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="Default"/>
+    <property name="snap_width" type="string" value="a&#13;b&#10;c&#9;d"/>
+    <property name="mixed" type="string" value="x&#13;&#10;y"/>
+    <property name="focus_delay" type="int" value="250"/>
+  </property>
+</channel>
+"""
+
+
+def run(label, escape):
+    home = os.path.join(work, label)
+    xml_dir = os.path.join(home, ".config", "xfce4", "xfconf",
+                           "xfce-perchannel-xml")
+    os.makedirs(xml_dir)
+    path = os.path.join(xml_dir, "xfwm4.xml")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(FIXTURE)
+    saved = ET._escape_attrib
+    ET._escape_attrib = escape
+    argv = sys.argv
+    sys.argv = ["desktop-theme-migrate", home, xml_dir]
+    try:
+        exec(compile(program, script_path, "exec"), {"__name__": "__main__"})
+    except SystemExit as exc:
+        if exc.code not in (None, 0):
+            problems.append("%s: the inline program exited %r"
+                            % (label, exc.code))
+    finally:
+        sys.argv = argv
+        ET._escape_attrib = saved
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+data_38 = run("home-py38-escape", escape_attrib_38)
+data_now = run("home-current", ET._escape_attrib)
+
+# The bytes the running Python writes are the expected ones: a CR is &#13;
+# next to the &#10; of an LF and the &#09; of a tab, never a newline.
+if b'value="a&#13;b&#10;c&#09;d"' not in data_now:
+    problems.append("the running Python wrote %r" % (data_now,))
+if b'value="x&#13;&#10;y"' not in data_now:
+    problems.append("the CRLF value is %r" % (data_now,))
+# And 3.8's serialiser gives exactly the same bytes: this is what fails with
+# the CR sentinel deleted, and what no other test catches.
+if data_38 != data_now:
+    problems.append("Python 3.8's serialiser writes different bytes: %r"
+                    % (data_38,))
+if b"\r" in data_38:
+    problems.append("a raw CR is in the output")
+root = ET.fromstring(data_38)
+values = {prop.get("name"): prop.get("value") for prop in root.iter("property")}
+if values.get("snap_width") != "a\rb\nc\td":
+    problems.append("snap_width reads back %r" % (values.get("snap_width"),))
+if values.get("mixed") != "x\r\ny":
+    problems.append("mixed reads back %r" % (values.get("mixed"),))
+if "theme" in values:
+    problems.append("the theme property survived")
+if values.get("focus_delay") != "250":
+    problems.append("focus_delay reads back %r" % (values.get("focus_delay"),))
+
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    pass theme-migrate-cr-escaped
+  else
+    fail theme-migrate-cr-escaped "$(tr '\n' '|' <"$work/cr.out")"
+  fi
+
+  # 13. A real Python 3.8 (Ubuntu 20.04, JetPack 5) writes the same &#13; for
+  # the whitespace fixture test 1 checks, run through the whole script.
+  local py38
+  py38="$(command -v python3.8 2>/dev/null || true)"
+  if [ -z "$py38" ]; then
+    skip theme-migrate-py38 "python3.8 is not on PATH"
+  else
+    home="$work/home-real-py38"
+    xml="$home/.config/xfce4/xfconf/xfce-perchannel-xml"
+    mkdir -p "$xml" "$work/py38-bin"
+    ln -sf "$py38" "$work/py38-bin/python3"
+    cat >"$xml/xfwm4.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="Default"/>
+    <property name="snap_width" type="string" value="10&#9;tab&#10;line&#13;cr"/>
+    <property name="focus_delay" type="int" value="250"/>
+  </property>
+</channel>
+EOF
+    env -i PATH="$work/py38-bin:$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+      >"$work/py38.out" 2>"$work/py38.err"
+    rc=$?
+    problems=""
+    if [ "$rc" != 0 ]; then
+      problems+="exit $rc, stderr '$(tr '\n' '|' <"$work/py38.err")'; "
+    fi
+    if ! grep -qF 'value="10&#09;tab&#10;line&#13;cr"' "$xml/xfwm4.xml"; then
+      problems+="the CR in snap_width did not round-trip: $(tr '\n' '|' <"$xml/xfwm4.xml"); "
+    fi
+    grep -q 'name="theme"' "$xml/xfwm4.xml" && problems+="the theme property survived; "
+    grep -q 'name="focus_delay"' "$xml/xfwm4.xml" || problems+="focus_delay is gone; "
+    if [ -z "$problems" ]; then
+      pass theme-migrate-py38
+    else
+      fail theme-migrate-py38 "$problems"
+    fi
   fi
 
   rm -rf "$work"
@@ -3776,6 +3963,792 @@ SH
   fi
 }
 
+# --- the host session theme switch -------------------------------------------
+
+# One run of the session script under a private PATH. The stubs go one step
+# further than the ones above: the fake Xvnc publishes the socket, so the
+# script gets past it; dbus-launch runs the session in place; and the session
+# stub writes its environment to $SESSION_ENV, which is what the assertions
+# read. $THEME_ORDER records the order the migration and the session ran in.
+theme_session_run() {
+  local bindir=$1 home=$2 rundir=$3
+  shift 3
+  env -i PATH="$bindir" HOME="$home" RUNTIME_DIRECTORY="$rundir" "$@" \
+    "$(command -v bash)" host/teknoir-desktop-session
+}
+
+# The session's value of one variable, from the env dump the stub wrote.
+theme_session_env() {
+  sed -n "s/^$2=//p" "$1" 2>/dev/null
+}
+
+test_host_session_theme() {
+  local base="$TMP/session-theme"
+  local tools_dir="$base/tools"
+  local xfce_bin="$base/xfce-bin" mate_bin="$base/mate-bin"
+  local xdg="$base/xdg" migrate_ok="$base/migrate-ok" migrate_fail="$base/migrate-fail"
+  local pgrep_running="$base/pgrep-running" pgrep_idle="$base/pgrep-idle"
+  local out rc problems f home rundir envfile order
+
+  rm -rf "$base"
+  mkdir -p "$tools_dir" "$xfce_bin" "$mate_bin" "$xdg" "$pgrep_running" "$pgrep_idle"
+  # python3 makes the fake Xvnc's socket a real AF_UNIX socket: the script
+  # waits for -S, and a plain file never satisfies it. id is what the running-
+  # session check passes to pgrep; without a pgrep on the private PATH (every
+  # test below but the two pgrep ones) that check is skipped before id runs.
+  for f in mkdir od tr rm chgrp chmod hostname sleep env python3 id; do
+    ln -sf "$(command -v "$f")" "$tools_dir/$f"
+  done
+  # The two pgrep outcomes the theme switch has to tell apart; each records
+  # its arguments in $PGREP_LOG, so the test can assert the exact query.
+  cat >"$pgrep_running/pgrep" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >>"$PGREP_LOG"
+exit 0
+SH
+  cat >"$pgrep_idle/pgrep" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >>"$PGREP_LOG"
+exit 1
+SH
+  chmod 0755 "$pgrep_running/pgrep" "$pgrep_idle/pgrep"
+  printf '#!/bin/sh\nexit 0\n' >"$tools_dir/xauth"
+  cat >"$tools_dir/dbus-launch" <<'SH'
+#!/bin/sh
+# The stub session: drop the option the real dbus-launch consumes.
+case "${1:-}" in --exit-with-session) shift ;; esac
+exec "$@"
+SH
+  cat >"$tools_dir/Xtigervnc" <<'SH'
+#!/bin/sh
+case "${1:-}" in
+  -version) exit 0 ;;
+  -help)
+    echo "use: X [:<display>] [option]"
+    echo "Xvnc TigerVNC 1.15.0 - built 2026-07-03"
+    echo "  rfbunixpath      - Unix socket to listen for RFB protocol"
+    exit 0
+    ;;
+esac
+sock=""
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "-rfbunixpath" ] && sock="$arg"
+  prev="$arg"
+done
+[ -n "$sock" ] || exit 1
+exec python3 -c '
+import socket
+import sys
+import time
+server = socket.socket(socket.AF_UNIX)
+server.bind(sys.argv[1])
+time.sleep(60)
+' "$sock"
+SH
+  cat >"$xfce_bin/startxfce4" <<'SH'
+#!/bin/sh
+env >"$SESSION_ENV"
+printf 'session\n' >>"$THEME_ORDER"
+exit 0
+SH
+  cat >"$mate_bin/mate-session" <<'SH'
+#!/bin/sh
+env >"$SESSION_ENV"
+printf 'session\n' >>"$THEME_ORDER"
+exit 0
+SH
+  cat >"$migrate_ok" <<'SH'
+#!/bin/sh
+printf 'migrate\n' >>"$THEME_ORDER"
+exit 0
+SH
+  printf '#!/bin/sh\nexit 1\n' >"$migrate_fail"
+  chmod 0755 "$tools_dir/xauth" "$tools_dir/dbus-launch" "$tools_dir/Xtigervnc" \
+    "$xfce_bin/startxfce4" "$mate_bin/mate-session" "$migrate_ok" "$migrate_fail"
+
+  # 1. No TEKNOIR_DESKTOP_THEME: exactly today's behaviour. The migration
+  # override is set on purpose; nothing must run or be logged.
+  home="$base/home-none" rundir="$base/run-none" envfile="$base/env-none" order="$base/order-none"
+  mkdir -p "$home" "$rundir"
+  out="$(theme_session_run "$xfce_bin:$tools_dir" "$home" "$rundir" \
+    SESSION_ENV="$envfile" THEME_ORDER="$order" \
+    TEKNOIR_DESKTOP_THEME_MIGRATE="$migrate_ok" 2>&1)"
+  rc=$?
+  problems=""
+  [ "$rc" = 0 ] || problems+="exit $rc, want 0; "
+  if [ -f "$envfile" ]; then
+    grep -q '^GTK_THEME=' "$envfile" && problems+="the session got GTK_THEME; "
+    grep -q '^XDG_CONFIG_DIRS=' "$envfile" && problems+="the session got XDG_CONFIG_DIRS; "
+  else
+    problems+="the session did not run; "
+  fi
+  grep -qx migrate "$order" 2>/dev/null && problems+="the migration ran; "
+  if [[ "$out" == *"theme teknoir"* || "$out" == *"ignoring TEKNOIR_DESKTOP_THEME"* ]]; then
+    problems+="logged about the theme: $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+  # And a value that was given reaches the session untouched.
+  home="$base/home-none-given" rundir="$base/run-none-given" envfile="$base/env-none-given"
+  mkdir -p "$home" "$rundir"
+  theme_session_run "$xfce_bin:$tools_dir" "$home" "$rundir" \
+    SESSION_ENV="$envfile" THEME_ORDER="$base/order-none-given" \
+    XDG_CONFIG_DIRS=/a:/b \
+    TEKNOIR_DESKTOP_THEME_MIGRATE="$migrate_ok" >/dev/null 2>&1
+  if [ "$(theme_session_env "$envfile" XDG_CONFIG_DIRS)" != "/a:/b" ]; then
+    problems+="given XDG_CONFIG_DIRS became '$(theme_session_env "$envfile" XDG_CONFIG_DIRS)'; "
+  fi
+  if [ -z "$problems" ]; then
+    pass host-session-theme-none
+  else
+    fail host-session-theme-none "$problems"
+  fi
+
+  # 2. teknoir + XFCE: the xdg directory goes in front of XDG_CONFIG_DIRS
+  # (keeping a value that was already there), the migration runs once before
+  # the session, and GTK_THEME is not set.
+  home="$base/home-xfce" rundir="$base/run-xfce" envfile="$base/env-xfce" order="$base/order-xfce"
+  mkdir -p "$home" "$rundir"
+  out="$(theme_session_run "$xfce_bin:$tools_dir" "$home" "$rundir" \
+    SESSION_ENV="$envfile" THEME_ORDER="$order" \
+    TEKNOIR_DESKTOP_THEME=teknoir \
+    TEKNOIR_DESKTOP_THEME_XDG="$xdg" \
+    TEKNOIR_DESKTOP_THEME_MIGRATE="$migrate_ok" 2>&1)"
+  rc=$?
+  problems=""
+  [ "$rc" = 0 ] || problems+="exit $rc, want 0; "
+  if [ "$(theme_session_env "$envfile" XDG_CONFIG_DIRS)" != "$xdg:/etc/xdg" ]; then
+    problems+="session XDG_CONFIG_DIRS '$(theme_session_env "$envfile" XDG_CONFIG_DIRS)', want '$xdg:/etc/xdg'; "
+  fi
+  grep -q '^GTK_THEME=' "$envfile" 2>/dev/null && problems+="the session got GTK_THEME; "
+  if [ "$(tr '\n' ' ' <"$order" 2>/dev/null)" != "migrate session " ]; then
+    problems+="order '$(tr '\n' ' ' <"$order" 2>/dev/null)', want migrate before session; "
+  fi
+  [[ "$out" == *"theme teknoir: XFCE defaults from $xdg"* ]] || problems+="no 'XFCE defaults from' line; "
+  if [ -z "$problems" ]; then
+    pass host-session-theme-xfce
+  else
+    fail host-session-theme-xfce "$problems"
+  fi
+
+  # 2b. The same with a value that was already there: it is kept behind ours.
+  home="$base/home-xfce-given" rundir="$base/run-xfce-given" envfile="$base/env-xfce-given"
+  mkdir -p "$home" "$rundir"
+  out="$(theme_session_run "$xfce_bin:$tools_dir" "$home" "$rundir" \
+    SESSION_ENV="$envfile" THEME_ORDER="$base/order-xfce-given" \
+    XDG_CONFIG_DIRS=/a:/b \
+    TEKNOIR_DESKTOP_THEME=teknoir \
+    TEKNOIR_DESKTOP_THEME_XDG="$xdg" \
+    TEKNOIR_DESKTOP_THEME_MIGRATE="$migrate_ok" 2>&1)"
+  rc=$?
+  problems=""
+  [ "$rc" = 0 ] || problems+="exit $rc, want 0; "
+  if [ "$(theme_session_env "$envfile" XDG_CONFIG_DIRS)" != "$xdg:/a:/b" ]; then
+    problems+="session XDG_CONFIG_DIRS '$(theme_session_env "$envfile" XDG_CONFIG_DIRS)', want '$xdg:/a:/b'; "
+  fi
+  if [ -z "$problems" ]; then
+    pass host-session-theme-xdg-given
+  else
+    fail host-session-theme-xdg-given "$problems"
+  fi
+
+  # 2c. A local XFCE session of this user is running (pgrep finds xfconfd): the
+  # migration is not run - its xfconfd would write the old values back - the
+  # wait is logged, and the session still gets the theme's config dirs.
+  home="$base/home-xfce-running" rundir="$base/run-xfce-running"
+  envfile="$base/env-xfce-running" order="$base/order-xfce-running"
+  mkdir -p "$home" "$rundir"
+  out="$(theme_session_run "$xfce_bin:$pgrep_running:$tools_dir" "$home" "$rundir" \
+    SESSION_ENV="$envfile" THEME_ORDER="$order" \
+    PGREP_LOG="$base/pgrep-running.log" \
+    TEKNOIR_DESKTOP_THEME=teknoir \
+    TEKNOIR_DESKTOP_THEME_XDG="$xdg" \
+    TEKNOIR_DESKTOP_THEME_MIGRATE="$migrate_ok" 2>&1)"
+  rc=$?
+  problems=""
+  [ "$rc" = 0 ] || problems+="exit $rc, want 0; "
+  [ "$(cat "$base/pgrep-running.log" 2>/dev/null)" = "-u $(id -u) -x xfconfd" ] ||
+    problems+="pgrep got '$(tr '\n' '|' <"$base/pgrep-running.log" 2>/dev/null)', want '-u $(id -u) -x xfconfd'; "
+  if [ "$(tr '\n' ' ' <"$order" 2>/dev/null)" = "migrate session " ]; then
+    problems+="the migration ran under a running XFCE session; "
+  fi
+  [ -f "$envfile" ] || problems+="the session did not run; "
+  [[ "$out" == *"theme teknoir: an XFCE session of this user is already running (xfconfd); the migration waits for a start without one"* ]] ||
+    problems+="no 'already running' line: $(printf '%s' "$out" | tr '\n' '|'); "
+  if [ "$(theme_session_env "$envfile" XDG_CONFIG_DIRS)" != "$xdg:/etc/xdg" ]; then
+    problems+="session XDG_CONFIG_DIRS '$(theme_session_env "$envfile" XDG_CONFIG_DIRS)', want '$xdg:/etc/xdg'; "
+  fi
+  if [ -z "$problems" ]; then
+    pass host-session-theme-xfconfd-running
+  else
+    fail host-session-theme-xfconfd-running "$problems"
+  fi
+
+  # 2d. pgrep present but finding no xfconfd: the migration runs as before.
+  home="$base/home-xfce-idle" rundir="$base/run-xfce-idle"
+  envfile="$base/env-xfce-idle" order="$base/order-xfce-idle"
+  mkdir -p "$home" "$rundir"
+  out="$(theme_session_run "$xfce_bin:$pgrep_idle:$tools_dir" "$home" "$rundir" \
+    SESSION_ENV="$envfile" THEME_ORDER="$order" \
+    PGREP_LOG="$base/pgrep-idle.log" \
+    TEKNOIR_DESKTOP_THEME=teknoir \
+    TEKNOIR_DESKTOP_THEME_XDG="$xdg" \
+    TEKNOIR_DESKTOP_THEME_MIGRATE="$migrate_ok" 2>&1)"
+  rc=$?
+  problems=""
+  [ "$rc" = 0 ] || problems+="exit $rc, want 0; "
+  [ "$(cat "$base/pgrep-idle.log" 2>/dev/null)" = "-u $(id -u) -x xfconfd" ] ||
+    problems+="pgrep got '$(tr '\n' '|' <"$base/pgrep-idle.log" 2>/dev/null)', want '-u $(id -u) -x xfconfd'; "
+  if [ "$(tr '\n' ' ' <"$order" 2>/dev/null)" != "migrate session " ]; then
+    problems+="order '$(tr '\n' ' ' <"$order" 2>/dev/null)', want migrate before session; "
+  fi
+  [[ "$out" == *"already running"* ]] && problems+="logged a running session with no xfconfd; "
+  if [ -z "$problems" ]; then
+    pass host-session-theme-xfconfd-idle
+  else
+    fail host-session-theme-xfconfd-idle "$problems"
+  fi
+
+  # 3. A failed migration only logs: the desktop still starts.
+  home="$base/home-migrate-fail" rundir="$base/run-migrate-fail" envfile="$base/env-migrate-fail"
+  mkdir -p "$home" "$rundir"
+  out="$(theme_session_run "$xfce_bin:$tools_dir" "$home" "$rundir" \
+    SESSION_ENV="$envfile" THEME_ORDER="$base/order-migrate-fail" \
+    TEKNOIR_DESKTOP_THEME=teknoir \
+    TEKNOIR_DESKTOP_THEME_XDG="$xdg" \
+    TEKNOIR_DESKTOP_THEME_MIGRATE="$migrate_fail" 2>&1)"
+  rc=$?
+  problems=""
+  [ "$rc" = 0 ] || problems+="exit $rc, want 0; "
+  [[ "$out" == *"theme migration failed"* ]] || problems+="no 'theme migration failed' line; "
+  [ -f "$envfile" ] || problems+="the session did not run; "
+  if [ -z "$problems" ]; then
+    pass host-session-theme-migrate-failed
+  else
+    fail host-session-theme-migrate-failed "$problems"
+  fi
+
+  # 4. No xdg directory on the device: unthemed, and the migration is not run.
+  home="$base/home-xdg-missing" rundir="$base/run-xdg-missing" envfile="$base/env-xdg-missing"
+  order="$base/order-xdg-missing"
+  mkdir -p "$home" "$rundir"
+  out="$(theme_session_run "$xfce_bin:$tools_dir" "$home" "$rundir" \
+    SESSION_ENV="$envfile" THEME_ORDER="$order" \
+    TEKNOIR_DESKTOP_THEME=teknoir \
+    TEKNOIR_DESKTOP_THEME_XDG="$base/no-such-xdg" \
+    TEKNOIR_DESKTOP_THEME_MIGRATE="$migrate_ok" 2>&1)"
+  rc=$?
+  problems=""
+  [ "$rc" = 0 ] || problems+="exit $rc, want 0; "
+  [[ "$out" == *"is missing; the desktop starts unthemed"* ]] || problems+="no 'starts unthemed' line; "
+  grep -q '^XDG_CONFIG_DIRS=' "$envfile" 2>/dev/null && problems+="the session got XDG_CONFIG_DIRS; "
+  grep -qx migrate "$order" 2>/dev/null && problems+="the migration ran; "
+  [ -f "$envfile" ] || problems+="the session did not run; "
+  if [ -z "$problems" ]; then
+    pass host-session-theme-xdg-missing
+  else
+    fail host-session-theme-xdg-missing "$problems"
+  fi
+
+  # 5. A session that is not XFCE gets the GTK colours only.
+  home="$base/home-mate" rundir="$base/run-mate" envfile="$base/env-mate" order="$base/order-mate"
+  mkdir -p "$home" "$rundir"
+  out="$(theme_session_run "$mate_bin:$tools_dir" "$home" "$rundir" \
+    SESSION_ENV="$envfile" THEME_ORDER="$order" \
+    TEKNOIR_DESKTOP_THEME=teknoir \
+    TEKNOIR_DESKTOP_THEME_XDG="$xdg" \
+    TEKNOIR_DESKTOP_THEME_MIGRATE="$migrate_ok" 2>&1)"
+  rc=$?
+  problems=""
+  [ "$rc" = 0 ] || problems+="exit $rc, want 0; "
+  [ "$(theme_session_env "$envfile" GTK_THEME)" = Teknoir ] || problems+="session GTK_THEME '$(theme_session_env "$envfile" GTK_THEME)', want Teknoir; "
+  grep -q '^XDG_CONFIG_DIRS=' "$envfile" 2>/dev/null && problems+="the session got XDG_CONFIG_DIRS; "
+  grep -qx migrate "$order" 2>/dev/null && problems+="the migration ran; "
+  [[ "$out" == *"GTK colours only for mate-session"* ]] || problems+="no 'GTK colours only' line; "
+  if [ -z "$problems" ]; then
+    pass host-session-theme-gtk-only
+  else
+    fail host-session-theme-gtk-only "$problems"
+  fi
+
+  # 6. An unknown value is logged and ignored, and is never exit 78.
+  home="$base/home-bogus" rundir="$base/run-bogus" envfile="$base/env-bogus" order="$base/order-bogus"
+  mkdir -p "$home" "$rundir"
+  out="$(theme_session_run "$xfce_bin:$tools_dir" "$home" "$rundir" \
+    SESSION_ENV="$envfile" THEME_ORDER="$order" \
+    TEKNOIR_DESKTOP_THEME=bogus \
+    TEKNOIR_DESKTOP_THEME_XDG="$xdg" \
+    TEKNOIR_DESKTOP_THEME_MIGRATE="$migrate_ok" 2>&1)"
+  rc=$?
+  problems=""
+  [ "$rc" = 0 ] || problems+="exit $rc, want 0 (never 78); "
+  [[ "$out" == *"ignoring TEKNOIR_DESKTOP_THEME=bogus"* ]] || problems+="no 'ignoring' line; "
+  grep -q '^GTK_THEME=' "$envfile" 2>/dev/null && problems+="the session got GTK_THEME; "
+  grep -q '^XDG_CONFIG_DIRS=' "$envfile" 2>/dev/null && problems+="the session got XDG_CONFIG_DIRS; "
+  grep -qx migrate "$order" 2>/dev/null && problems+="the migration ran; "
+  if [ -z "$problems" ]; then
+    pass host-session-theme-bogus
+  else
+    fail host-session-theme-bogus "$problems"
+  fi
+
+  rm -rf "$base"
+}
+
+# --- the host-mode bundle ----------------------------------------------------
+
+# A Dockerfile with the fake fonts' real hashes: the tool reads the font pins
+# from it and the bytes from --fonts-from, so the test needs no network.
+host_bundle_dockerfile() {
+  local fonts=$1 dest=$2
+  local hanken hanken_ofl jetbrains jetbrains_ofl
+  hanken="$(sha256sum "$fonts/HankenGrotesk-VF.ttf" | cut -d' ' -f1)"
+  hanken_ofl="$(sha256sum "$fonts/HankenGrotesk-OFL.txt" | cut -d' ' -f1)"
+  jetbrains="$(sha256sum "$fonts/JetBrainsMono-VF.ttf" | cut -d' ' -f1)"
+  jetbrains_ofl="$(sha256sum "$fonts/JetBrainsMono-OFL.txt" | cut -d' ' -f1)"
+  cat >"$dest" <<EOF
+ARG GOOGLE_FONTS_COMMIT=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+ARG HANKEN_GROTESK_SHA256=$hanken
+ARG HANKEN_GROTESK_OFL_SHA256=$hanken_ofl
+ARG JETBRAINS_MONO_SHA256=$jetbrains
+ARG JETBRAINS_MONO_OFL_SHA256=$jetbrains_ofl
+
+ADD https://raw.githubusercontent.com/google/fonts/\${GOOGLE_FONTS_COMMIT}/ofl/hankengrotesk/HankenGrotesk%5Bwght%5D.ttf /tmp/fonts/HankenGrotesk-VF.ttf
+ADD https://raw.githubusercontent.com/google/fonts/\${GOOGLE_FONTS_COMMIT}/ofl/hankengrotesk/OFL.txt /tmp/fonts/HankenGrotesk-OFL.txt
+ADD https://raw.githubusercontent.com/google/fonts/\${GOOGLE_FONTS_COMMIT}/ofl/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf /tmp/fonts/JetBrainsMono-VF.ttf
+ADD https://raw.githubusercontent.com/google/fonts/\${GOOGLE_FONTS_COMMIT}/ofl/jetbrainsmono/OFL.txt /tmp/fonts/JetBrainsMono-OFL.txt
+EOF
+}
+
+# The tool, always offline and always allowed a dirty tree (this suite may run
+# in one); the extra arguments are --out and the error cases' variants.
+host_bundle_run() {
+  local fonts=$1 dockerfile=$2
+  shift 2
+  python3 -I tools/host-bundle.py --fonts-from "$fonts" --dockerfile "$dockerfile" \
+    --allow-dirty "$@"
+}
+
+test_host_bundle() {
+  local work="$TMP/host-bundle"
+  local fonts="$work/fonts" df="$work/Dockerfile"
+  local out="$work/out" out2="$work/out2" rc f problems summary commit
+  rm -rf "$work"
+  mkdir -p "$fonts"
+  for f in HankenGrotesk-VF.ttf HankenGrotesk-OFL.txt JetBrainsMono-VF.ttf \
+    JetBrainsMono-OFL.txt; do
+    printf 'fake font %s\n' "$f" >"$fonts/$f"
+  done
+  host_bundle_dockerfile "$fonts" "$df"
+
+  # 1. The happy path: the exact file list, the modes, a checksum file that
+  # checks, the commit, byte-identical xdg sources, and nothing image-only.
+  summary="$(host_bundle_run "$fonts" "$df" --out "$out" 2>&1)"
+  rc=$?
+  problems=""
+  [ "$rc" = 0 ] || problems+="exit $rc '$summary'; "
+  {
+    printf '%s\n' \
+      SOURCE SHA256SUMS \
+      teknoir-desktop-session teknoir-desktop.service \
+      theme/desktop-theme-migrate theme/teknoir-mark.svg \
+      theme/fonts/HankenGrotesk-OFL.txt theme/fonts/HankenGrotesk-VF.ttf \
+      theme/fonts/JetBrainsMono-OFL.txt theme/fonts/JetBrainsMono-VF.ttf \
+      theme/xdg/xfce4/panel/default.xml \
+      theme/xdg/xfce4/terminal/terminalrc \
+      theme/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml \
+      theme/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-terminal.xml \
+      theme/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml \
+      theme/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml
+    # The theme tree is what git publishes, not what the checkout holds: the
+    # tool copies git ls-files, so an ignored editor file must not count.
+    git ls-files --cached --others --exclude-standard -- \
+      rootfs/usr/share/themes/Teknoir |
+      sed 's#^rootfs/usr/share/themes/Teknoir/#theme/themes/Teknoir/#'
+  } | sort >"$work/expected"
+  if [ -d "$out" ]; then
+    (cd "$out" && find . -type f -printf '%P\n' | sort) >"$work/actual"
+  else
+    : >"$work/actual"
+  fi
+  cmp -s "$work/expected" "$work/actual" ||
+    problems+="file list differs: $(diff "$work/expected" "$work/actual" | head -5 | tr '\n' '|'); "
+  for f in teknoir-desktop-session theme/desktop-theme-migrate; do
+    [ "$(stat -c %a "$out/$f" 2>/dev/null)" = 755 ] || problems+="$f is $(stat -c %a "$out/$f" 2>/dev/null), want 755; "
+  done
+  while IFS= read -r f; do
+    case $f in teknoir-desktop-session | theme/desktop-theme-migrate) continue ;; esac
+    [ "$(stat -c %a "$out/$f" 2>/dev/null)" = 644 ] || problems+="$f is $(stat -c %a "$out/$f" 2>/dev/null), want 644; "
+  done < <(cd "$out" 2>/dev/null && find . -type f -printf '%P\n')
+  find "$out" -type d -exec stat -c %a {} + 2>/dev/null >"$work/dir-modes"
+  grep -qvx 755 "$work/dir-modes" && problems+="a directory is not 0755; "
+  if ! (cd "$out" && sha256sum -c SHA256SUMS >/dev/null 2>&1); then
+    problems+="sha256sum -c SHA256SUMS failed; "
+  fi
+  grep -qx 'repo: teknoir/teknoir-desktop' "$out/SOURCE" 2>/dev/null ||
+    problems+="SOURCE has no repo line; "
+  commit="$(git rev-parse HEAD)"
+  grep -qx "commit: $commit" "$out/SOURCE" 2>/dev/null ||
+    problems+="SOURCE has no commit: $commit; "
+  for f in xsettings xfwm4 xfce4-terminal xfce4-desktop; do
+    cmp -s "$out/theme/xdg/xfce4/xfconf/xfce-perchannel-xml/$f.xml" \
+      "rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/$f.xml" ||
+      problems+="$f.xml is not the image's; "
+  done
+  # The panel file is the image's with exactly one line added: the clock's
+  # pre-4.18 digital-format key (and nothing else moves).
+  diff -u "$PANEL_DEFAULT" "$out/theme/xdg/xfce4/panel/default.xml" \
+    >"$work/panel.diff" 2>&1
+  if [ $? -ne 1 ]; then
+    problems+="default.xml does not differ from the image's: $(tr '\n' '|' <"$work/panel.diff"); "
+  else
+    [ "$(grep -c '^+[^+]' "$work/panel.diff")" = 1 ] ||
+      problems+="default.xml has $(grep -c '^+[^+]' "$work/panel.diff") added lines, want 1; "
+    [ "$(grep -c '^-[^-]' "$work/panel.diff")" = 0 ] ||
+      problems+="default.xml lost lines; "
+    grep -qxF '+      <property name="digital-format" type="string" value="%H:%M"/>' \
+      "$work/panel.diff" || problems+="the added line is not the clock's digital-format; "
+  fi
+  python3 -I -c 'import sys, xml.etree.ElementTree as ET; ET.parse(sys.argv[1])' \
+    "$out/theme/xdg/xfce4/panel/default.xml" 2>"$work/panel-parse.err" ||
+    problems+="default.xml does not parse: $(tr '\n' '|' <"$work/panel-parse.err"); "
+  # xfce4-terminal 0.8's terminalrc: the channel's settings, keyed the other
+  # way, in file order - every line asserted.
+  cat >"$work/terminalrc.expected" <<'EOF'
+[Configuration]
+ColorForeground=#F2F1EE
+ColorBackground=#000000
+ColorCursor=#8CA7F2
+ColorCursorUseDefault=FALSE
+ColorSelection=#FFFFFF
+ColorSelectionBackground=#3B61BF
+ColorSelectionUseDefault=FALSE
+ColorBoldIsBright=FALSE
+ColorPalette=#2A2A2A;#FA5A5A;#2BC966;#F5B02E;#6F90EA;#C25BA6;#2BB8C4;#C7C5BF;#8C8C8C;#FC8C8C;#6BD994;#F8C86D;#9AB1F0;#D48CC1;#6BCDD6;#F2F1EE
+FontUseSystem=FALSE
+FontName=JetBrains Mono 10
+ScrollingBar=TERMINAL_SCROLLBAR_NONE
+MiscMenubarDefault=FALSE
+MiscDefaultGeometry=100x30
+EOF
+  cmp -s "$work/terminalrc.expected" "$out/theme/xdg/xfce4/terminal/terminalrc" ||
+    problems+="terminalrc differs: $(diff "$work/terminalrc.expected" "$out/theme/xdg/xfce4/terminal/terminalrc" 2>&1 | tr '\n' '|'); "
+  for f in \
+    theme/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml \
+    theme/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-screensaver.xml \
+    theme/fonts/local.conf theme/gtk-3.0/settings.ini; do
+    [ -e "$out/$f" ] && problems+="$f must not be in the bundle; "
+  done
+  [[ "$summary" == *"commit ${commit:0:8}"* ]] ||
+    problems+="summary names no commit: '$summary'; "
+  if [ -z "$problems" ]; then
+    pass host-bundle
+  else
+    fail host-bundle "$problems"
+  fi
+
+  # 2. Determinism: two runs, the same bytes.
+  host_bundle_run "$fonts" "$df" --out "$out2" >/dev/null 2>&1
+  if cmp -s "$out/SHA256SUMS" "$out2/SHA256SUMS"; then
+    pass host-bundle-deterministic
+  else
+    fail host-bundle-deterministic "SHA256SUMS differs between two runs"
+  fi
+
+  # 3. A re-run into the same directory replaces the theme tree.
+  printf 'stray\n' >"$out/theme/stray"
+  summary="$(host_bundle_run "$fonts" "$df" --out "$out" 2>&1)"
+  rc=$?
+  if [ "$rc" = 0 ] && [ ! -e "$out/theme/stray" ] &&
+    (cd "$out" && sha256sum -c --quiet SHA256SUMS >/dev/null 2>&1); then
+    pass host-bundle-rerun
+  else
+    fail host-bundle-rerun "exit $rc '$summary', stray '$( [ -e "$out/theme/stray" ] && echo still there)'"
+  fi
+
+  # 4. A directory holding anything else is refused, untouched.
+  local foreign="$work/foreign"
+  mkdir -p "$foreign"
+  printf 'mine\n' >"$foreign/README"
+  summary="$(host_bundle_run "$fonts" "$df" --out "$foreign" 2>&1)"
+  rc=$?
+  if [ "$rc" = 2 ] && [[ "$summary" == *README* ]] &&
+    [ "$(ls -A "$foreign")" = README ]; then
+    pass host-bundle-foreign-entry
+  else
+    fail host-bundle-foreign-entry "exit $rc '$summary', entries '$(ls -A "$foreign")'"
+  fi
+
+  # 5. A font whose bytes do not match the pin: exit 1 and nothing changes.
+  local good_sum
+  good_sum="$(sha256sum "$out/SHA256SUMS")"
+  cp "$fonts/JetBrainsMono-VF.ttf" "$work/jetbrains-mono.bak"
+  printf 'tampered\n' >"$fonts/JetBrainsMono-VF.ttf"
+  summary="$(host_bundle_run "$fonts" "$df" --out "$out" 2>&1)"
+  rc=$?
+  mv "$work/jetbrains-mono.bak" "$fonts/JetBrainsMono-VF.ttf"
+  if [ "$rc" = 1 ] && [[ "$summary" == *JetBrainsMono-VF.ttf*sha256* ]] &&
+    [ "$(sha256sum "$out/SHA256SUMS")" = "$good_sum" ]; then
+    pass host-bundle-font-mismatch
+  else
+    fail host-bundle-font-mismatch "exit $rc '$summary'"
+  fi
+
+  # 6. A Dockerfile without one ADD line, and one without one ARG: exit 2.
+  problems=""
+  grep -v 'JetBrainsMono%5Bwght%5D' "$df" >"$work/Dockerfile.noadd"
+  summary="$(host_bundle_run "$fonts" "$work/Dockerfile.noadd" --out "$work/out-noadd" 2>&1)"
+  rc=$?
+  [ "$rc" = 2 ] || problems+="no ADD line: exit $rc '$summary'; "
+  [ -e "$work/out-noadd" ] && problems+="no ADD line wrote $work/out-noadd; "
+  grep -v '^ARG JETBRAINS_MONO_SHA256=' "$df" >"$work/Dockerfile.noarg"
+  summary="$(host_bundle_run "$fonts" "$work/Dockerfile.noarg" --out "$work/out-noarg" 2>&1)"
+  rc=$?
+  [ "$rc" = 2 ] || problems+="no ARG: exit $rc '$summary'; "
+  [ -e "$work/out-noarg" ] && problems+="no ARG wrote $work/out-noarg; "
+  if [ -z "$problems" ]; then
+    pass host-bundle-dockerfile-errors
+  else
+    fail host-bundle-dockerfile-errors "$problems"
+  fi
+
+  # 7. The dirty-tree decision, in a temporary git repo made of copies: this
+  # suite may itself run in a dirty tree, so the check cannot be observed here.
+  local repo="$work/repo" repo_out="$work/repo-out" repo_out2="$work/repo-out2"
+  mkdir -p "$repo/tools" "$repo/host" "$repo/rootfs/usr/share/teknoir" \
+    "$repo/rootfs/usr/local/bin" "$repo/rootfs/usr/share/themes" \
+    "$repo/rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml" \
+    "$repo/rootfs/etc/xdg/xfce4/panel"
+  cp tools/host-bundle.py "$repo/tools/"
+  cp host/teknoir-desktop-session host/teknoir-desktop.service "$repo/host/"
+  cp -R rootfs/usr/share/themes/Teknoir "$repo/rootfs/usr/share/themes/"
+  cp rootfs/usr/share/teknoir/teknoir-mark.svg "$repo/rootfs/usr/share/teknoir/"
+  cp rootfs/usr/local/bin/desktop-theme-migrate "$repo/rootfs/usr/local/bin/"
+  cp rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/*.xml \
+    "$repo/rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/"
+  cp rootfs/etc/xdg/xfce4/panel/default.xml "$repo/rootfs/etc/xdg/xfce4/panel/"
+  cp "$df" "$repo/Dockerfile"
+  # The throwaway repo must not depend on anyone's global config: no signing,
+  # no hooks, an identity of its own.
+  (cd "$repo" && git init -q && git add -A &&
+    git -c commit.gpgsign=false -c core.hooksPath=/dev/null \
+      -c user.name=test -c user.email=test@example.invalid commit -qm init)
+  problems=""
+  summary="$(python3 -I "$repo/tools/host-bundle.py" --fonts-from "$fonts" \
+    --out "$repo_out" 2>&1)"
+  rc=$?
+  [ "$rc" = 0 ] || problems+="clean tree: exit $rc '$summary'; "
+  grep -qx 'dirty: true' "$repo_out/SOURCE" 2>/dev/null &&
+    problems+="clean tree: SOURCE says dirty; "
+  printf '# a local change\n' >>"$repo/host/teknoir-desktop-session"
+  summary="$(python3 -I "$repo/tools/host-bundle.py" --fonts-from "$fonts" \
+    --out "$repo_out2" 2>&1)"
+  rc=$?
+  [ "$rc" = 2 ] || problems+="dirty tree without --allow-dirty: exit $rc, want 2; "
+  [[ "$summary" == *host/teknoir-desktop-session* ]] ||
+    problems+="dirty refusal names no path: '$summary'; "
+  [ -e "$repo_out2" ] && problems+="dirty tree wrote $repo_out2; "
+  summary="$(python3 -I "$repo/tools/host-bundle.py" --fonts-from "$fonts" \
+    --allow-dirty --out "$repo_out2" 2>&1)"
+  rc=$?
+  [ "$rc" = 0 ] || problems+="dirty tree with --allow-dirty: exit $rc '$summary'; "
+  grep -qx 'dirty: true' "$repo_out2/SOURCE" 2>/dev/null ||
+    problems+="dirty tree: SOURCE does not say dirty; "
+  if [ -z "$problems" ]; then
+    pass host-bundle-dirty
+  else
+    fail host-bundle-dirty "$problems"
+  fi
+
+  # 8. A replace that fails part way leaves the old bundle whole: a read-only
+  # theme directory makes the first move-aside fail, and the rollback has to
+  # restore the two entries it had already parked, not empty --out.
+  # Root ignores the directory's mode, so the move-aside would not fail; the
+  # interrupt cases below cover the same rollback there.
+  local out4="$work/out-readonly" leftovers
+  if [ "$(id -u)" = 0 ]; then
+    skip host-bundle-failed-replace "running as root: a 0555 directory does not stop root"
+  else
+  host_bundle_run "$fonts" "$df" --out "$out4" >/dev/null 2>&1
+  (cd "$out4" && find . -type f -printf '%P\n' | sort) >"$work/ro-before"
+  chmod 0555 "$out4/theme"
+  summary="$(host_bundle_run "$fonts" "$df" --out "$out4" 2>&1)"
+  rc=$?
+  chmod 0755 "$out4/theme"
+  problems=""
+  [ "$rc" = 2 ] || problems+="exit $rc '$summary', want 2; "
+  if ! (cd "$out4" && sha256sum -c --quiet SHA256SUMS >/dev/null 2>&1); then
+    problems+="the old bundle's SHA256SUMS no longer check; "
+  fi
+  (cd "$out4" && find . -type f -printf '%P\n' | sort) >"$work/ro-after"
+  cmp -s "$work/ro-before" "$work/ro-after" ||
+    problems+="the file list changed: $(diff "$work/ro-before" "$work/ro-after" | head -5 | tr '\n' '|'); "
+  leftovers="$(find "$work" -maxdepth 1 -name '.host-bundle*')"
+  [ -z "$leftovers" ] || problems+="left a temporary directory behind: $leftovers; "
+  if [ -z "$problems" ]; then
+    pass host-bundle-failed-replace
+  else
+    fail host-bundle-failed-replace "$problems"
+  fi
+  fi
+
+  # 9. Ctrl-C in the middle of the replace: the test-only fault hook raises
+  # KeyboardInterrupt before the n-th rename. Five entries are moved aside
+  # first, so n=1 is before any move, n=2 after one move-aside, n=6 the first
+  # move-in and n=10 the last one (the fifth entry moved in). A marker file in
+  # the old theme shows that the rollback puts the parked entries back whole:
+  # it must survive every case, with the old file list unchanged and no backup
+  # directory left behind.
+  local out5="$work/out-interrupt"
+  host_bundle_run "$fonts" "$df" --out "$out5" >/dev/null 2>&1
+  problems=""
+  for n in 1 2 6 7 10; do
+    printf 'old marker\n' >"$out5/theme/old-marker"
+    (cd "$out5" && find . -type f -printf '%P\n' | sort) >"$work/interrupt-before"
+    summary="$(env HOST_BUNDLE_TEST_FAIL_AT="$n" python3 -I tools/host-bundle.py \
+      --fonts-from "$fonts" --dockerfile "$df" --allow-dirty --out "$out5" 2>&1)"
+    rc=$?
+    [ "$rc" -ne 0 ] || problems+="n=$n: exit 0 '$summary', want non-zero; "
+    [ -f "$out5/theme/old-marker" ] || problems+="n=$n: theme/old-marker is gone; "
+    (cd "$out5" && find . -type f -printf '%P\n' | sort) >"$work/interrupt-after"
+    cmp -s "$work/interrupt-before" "$work/interrupt-after" ||
+      problems+="n=$n: the file list changed: $(diff "$work/interrupt-before" "$work/interrupt-after" | head -5 | tr '\n' '|'); "
+    if ! (cd "$out5" && sha256sum -c --quiet SHA256SUMS >/dev/null 2>&1); then
+      problems+="n=$n: the old bundle's SHA256SUMS no longer check; "
+    fi
+    leftovers="$(find "$work" -maxdepth 1 -name '.host-bundle*')"
+    [ -z "$leftovers" ] || problems+="n=$n: left a temporary directory behind: $leftovers; "
+  done
+  if [ -z "$problems" ]; then
+    pass host-bundle-interrupt
+  else
+    fail host-bundle-interrupt "$problems"
+  fi
+
+  # 10. An --out that is a symlink, or that sits inside rootfs/ or host/, is
+  # refused before anything is written.
+  problems=""
+  ln -s "$work/out-link-target" "$work/out-link"
+  summary="$(host_bundle_run "$fonts" "$df" --out "$work/out-link" 2>&1)"
+  rc=$?
+  [ "$rc" = 2 ] || problems+="symlink --out: exit $rc '$summary', want 2; "
+  [ -e "$work/out-link-target" ] && problems+="symlink --out wrote its target; "
+  for f in rootfs/usr/share/teknoir/bundle-test host/bundle-test; do
+    summary="$(host_bundle_run "$fonts" "$df" --out "$f" 2>&1)"
+    rc=$?
+    [ "$rc" = 2 ] || problems+="--out $f: exit $rc '$summary', want 2; "
+    if [ -e "$f" ]; then
+      problems+="--out $f was written; "
+      rm -rf "$f"
+    fi
+  done
+  if [ -z "$problems" ]; then
+    pass host-bundle-refused-out
+  else
+    fail host-bundle-refused-out "$problems"
+  fi
+
+  # 10b. A parent the tool cannot write into makes the temporary directory
+  # fail: a configuration error like the rest - exit 2, one message, no
+  # traceback (which would be exit 1, the font mismatch's), nothing written.
+  # Root ignores the mode, so the case is skipped there.
+  local roparent="$work/ro-parent"
+  if [ "$(id -u)" = 0 ]; then
+    skip host-bundle-unwritable-parent "running as root: a 0555 directory does not stop root"
+  else
+    mkdir -p "$roparent"
+    chmod 0555 "$roparent"
+    summary="$(host_bundle_run "$fonts" "$df" --out "$roparent/out" 2>&1)"
+    rc=$?
+    chmod 0755 "$roparent"
+    problems=""
+    [ "$rc" = 2 ] || problems+="exit $rc '$summary', want 2; "
+    [[ "$summary" == *"cannot create a temporary directory in $roparent"* ]] ||
+      problems+="the message does not name the parent: '$summary'; "
+    [[ "$summary" != *Traceback* ]] || problems+="a traceback was printed: '$summary'; "
+    [ -e "$roparent/out" ] && problems+="it wrote $roparent/out; "
+    [ -z "$(find "$roparent" -mindepth 1)" ] ||
+      problems+="it left entries in $roparent: $(find "$roparent" -mindepth 1 | tr '\n' ' '); "
+    if [ -z "$problems" ]; then
+      pass host-bundle-unwritable-parent
+    else
+      fail host-bundle-unwritable-parent "$problems"
+    fi
+  fi
+
+  # 11. A file git ignores is not part of the tree the bundle copies: an
+  # editor's *~ under the theme is skipped, and --out still builds.
+  local zz="rootfs/usr/share/themes/Teknoir/gtk-3.0/zz-test.css~"
+  problems=""
+  if ! git check-ignore -q -- "$zz"; then
+    problems+="the repository does not ignore $zz, so the test cannot run; "
+  else
+    printf 'ignored\n' >"$zz"
+    summary="$(host_bundle_run "$fonts" "$df" --out "$work/out-ignored" 2>&1)"
+    rc=$?
+    [ "$rc" = 0 ] || problems+="exit $rc '$summary'; "
+    [ -e "$work/out-ignored/theme/themes/Teknoir/gtk-3.0/zz-test.css~" ] &&
+      problems+="the ignored file was bundled; "
+    rm -f "$zz"
+  fi
+  if [ -z "$problems" ]; then
+    pass host-bundle-ignored-file
+  else
+    fail host-bundle-ignored-file "$problems"
+  fi
+
+  # 12. A source file git does not publish is a configuration error: in the
+  # temporary repository of test 7, ignore the migration and drop it from the
+  # index, and the build refuses with exit 2 instead of bundling a missing or
+  # stale file.
+  problems=""
+  if ! (
+    cd "$repo" &&
+      printf 'desktop-theme-migrate\n' >>.gitignore &&
+      git add .gitignore &&
+      git rm -q --cached rootfs/usr/local/bin/desktop-theme-migrate &&
+      git -c commit.gpgsign=false -c core.hooksPath=/dev/null \
+        -c user.name=test -c user.email=test@example.invalid commit -qm ignore
+  ) >"$work/ignored-repo.log" 2>&1; then
+    problems+="could not prepare the ignored-source repository: $(tr '\n' '|' <"$work/ignored-repo.log"); "
+  fi
+  summary="$(python3 -I "$repo/tools/host-bundle.py" --fonts-from "$fonts" \
+    --allow-dirty --out "$work/repo-out-ignored" 2>&1)"
+  rc=$?
+  [ "$rc" = 2 ] || problems+="exit $rc '$summary', want 2; "
+  [[ "$summary" == *rootfs/usr/local/bin/desktop-theme-migrate* ]] ||
+    problems+="the refusal names no source file: '$summary'; "
+  [ -e "$work/repo-out-ignored" ] && problems+="an ignored source still wrote $work/repo-out-ignored; "
+  if [ -z "$problems" ]; then
+    pass host-bundle-ignored-source
+  else
+    fail host-bundle-ignored-source "$problems"
+  fi
+
+  rm -rf "$work"
+}
+
+# No Python lint in this repository (make lint is shellcheck and hadolint);
+# compiling the tool and asking it for its help is the check it gets.
+test_host_bundle_python() {
+  local problems=""
+  if ! python3 -I -c 'compile(open("tools/host-bundle.py", encoding="utf-8").read(),
+"tools/host-bundle.py", "exec")' 2>"$TMP/bundle-compile.err"; then
+    problems+="does not compile: $(tr '\n' '|' <"$TMP/bundle-compile.err"); "
+  fi
+  if ! python3 -I tools/host-bundle.py --help >"$TMP/bundle-help.out" 2>&1; then
+    problems+="--help failed: $(tr '\n' '|' <"$TMP/bundle-help.out"); "
+  else
+    for f in --out --fonts-from --allow-dirty --dockerfile; do
+      grep -q -- "$f" "$TMP/bundle-help.out" || problems+="--help does not name $f; "
+    done
+  fi
+  if [ -z "$problems" ]; then
+    pass host-bundle-python
+  else
+    fail host-bundle-python "$problems"
+  fi
+}
+
 # --- index.html redirect ----------------------------------------------------
 
 test_index_redirect() {
@@ -5212,6 +6185,9 @@ test_desktop_entries
 test_manifests
 test_host_unit
 test_host_session
+test_host_session_theme
+test_host_bundle
+test_host_bundle_python
 test_index_redirect
 test_notice_script
 test_healthcheck
