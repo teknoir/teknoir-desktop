@@ -67,7 +67,8 @@ and display are set when `Xvnc` starts.
 Virtual mode runs Chromium from the XFCE autostart
 (`/usr/local/bin/desktop-browser`), so closing the browser window is harmless:
 the desktop stays up and the user can open a new browser from the application
-menu.
+menu. Before the first start the wrapper also seeds a new profile's title-bar
+preference (see [Theme](#theme)); a start refused below writes nothing.
 
 Chromium runs with its **renderer sandbox**, which needs an unprivileged user
 namespace (`unshare`/`clone` with `CLONE_NEWUSER`). `RuntimeDefault` seccomp
@@ -287,15 +288,16 @@ and the `xfwm4-theme` test proves the two never diverge.
   neutral, because colour is reserved for status. Shadows and compositing are
   off.
 
-**Chromium's frame.** `rootfs/etc/chromium/master_preferences` is Debian's
-file with one key added, `"custom_chrome_frame": false` under `"browser"`.
-Without it Chromium draws its own client-side frame, an opaque
-`#353535`/`#1B1B1B` band that is Adwaita grey, with no Teknoir title bar and
-no focus cue; with the pref off, xfwm4 frames Chromium like every other
-window. It applies to new profiles only, which is what the image has (the
-examples' home is an `emptyDir`), and it costs the 30 px of height the title
-bar takes. The file replaces Debian's because `COPY rootfs/ /` comes after the
-apt install, and JSON has no comments, so the reason lives here.
+**Chromium's frame.** Without a compositor Chromium draws its own client-side
+frame, an opaque `#353535`/`#1B1B1B` band that is Adwaita grey, with no
+Teknoir title bar and no focus cue. `desktop-browser` therefore seeds a new
+profile's `Default/Preferences` with `"custom_chrome_frame": false`, so xfwm4
+frames Chromium like every other window. `/etc/chromium/master_preferences`
+cannot do it: Chromium never imports initial (master) preferences for a
+profile started with `--no-first-run`, which the wrapper always passes. The
+seed writes the file only when it does not exist yet, so an existing profile
+(a persistent home, or a user who changed the setting) is left alone. It costs
+the 30 px of height the title bar takes.
 
 **Panel.** `rootfs/etc/xdg/xfce4/panel/default.xml` replaces Debian's;
 xfce4-panel's `migrate` applies it silently to a home with no panel config of
@@ -570,14 +572,15 @@ make image-council # the council image, amd64: make image-council TNCTL_REF=<com
 ```
 
 The test suite needs no docker and no root. It runs `shellcheck -x` over every
-script, `hadolint` over the Dockerfile, validates the Chromium policy JSON, the
-Chromium preferences and the xfconf XML, compares the entrypoint's
+script, `hadolint` over the Dockerfile, validates the Chromium policy JSON and
+the xfconf XML, compares the entrypoint's
 `DESKTOP_DRY_RUN=1` output against the
 vectors in `test/vectors/` (the defaults of both modes, overrides, and the
 validation errors with their exit codes), checks the `DESKTOP_NOTICE` rules and
 the `notice.json` file it writes, runs `desktop-browser` with stub
-`chromium`/`unshare`/`pgrep` binaries to check the argv it gets and when its
-Singleton files are removed, checks the `index.html` redirect logic and
+`chromium`/`unshare`/`pgrep` binaries to check the argv it gets, when its
+Singleton files are removed and that it seeds only a new profile, checks the
+`index.html` redirect logic and
 `teknoir-notice.js` against a stand-in page with `node`, and runs
 `desktop-healthcheck` against a stand-in RFB server and a
 stand-in web server, including a server that refuses the connection the way a
@@ -585,8 +588,8 @@ blacklisted Xvnc does. The theme has its own checks: the theme XML, the GTK
 theme (with the optional GTK parse when GTK3 and python-gi are installed), the
 GTK settings, the fonts, the Dockerfile's theme packages, the palette and the
 contrast pairs; the generated xfwm4 theme and its generator, the panel, the
-terminal and the backdrop; the noVNC stylesheet and the notice theme; and the
-Chromium preferences. It checks the council image the same way, without
+terminal and the backdrop; and the noVNC stylesheet and the notice theme. It
+checks the council image the same way, without
 docker: that the old agent image is gone, the stage and its parent, the
 OpenCode pin, the entrypoint, user and environment, every rule of
 `opencode.json`, and that `make image-council` refuses anything but a full

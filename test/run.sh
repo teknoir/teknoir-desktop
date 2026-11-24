@@ -161,32 +161,6 @@ if data.get("CommandLineFlagSecurityWarningsEnabled") is not False:
   fi
 }
 
-# /etc/chromium/master_preferences is Debian's file plus one key:
-# browser.custom_chrome_frame=false makes xfwm4 frame Chromium like any other
-# window, instead of its own opaque grey client-side frame with no Teknoir
-# title bar and no focus cue. Debian's keys have to survive the copy.
-test_chromium_prefs() {
-  if python3 -I -c '
-import json, sys
-with open("rootfs/etc/chromium/master_preferences", encoding="utf-8") as fh:
-    prefs = json.load(fh)
-if not isinstance(prefs, dict) or not prefs:
-    sys.exit("master_preferences is not a non-empty JSON object")
-if prefs.get("browser", {}).get("custom_chrome_frame") is not False:
-    sys.exit("browser.custom_chrome_frame is not false")
-if prefs.get("distribution", {}).get("import_bookmarks") is not False:
-    sys.exit("distribution.import_bookmarks is not the stock false")
-if prefs.get("browser", {}).get("check_default_browser") is not False:
-    sys.exit("browser.check_default_browser is not the stock false")
-if prefs.get("signin", {}).get("allowed") is not False:
-    sys.exit("signin.allowed is not the stock false")
-' >"$TMP/chromium-prefs.out" 2>&1; then
-    pass chromium-prefs
-  else
-    fail chromium-prefs "$(tr '\n' '|' <"$TMP/chromium-prefs.out")"
-  fi
-}
-
 test_xfconf_xml() {
   if python3 -I -c '
 import glob, sys
@@ -2535,6 +2509,165 @@ test_browser_live() {
   fi
 }
 
+# The wrapper seeds a new Chromium profile with
+# browser.custom_chrome_frame=false, so xfwm4 frames the window with the
+# Teknoir title bar instead of Chromium's own opaque grey client-side frame.
+# master_preferences never reaches a profile started with --no-first-run, so
+# this is the only way in; only a new profile is seeded.
+test_browser_profile_seed() {
+  local bin="$TMP/seed-bin" work chromium_args profile prefs mode rc problems
+  work="$(mktemp -d "${TMPDIR:-/var/tmp}/teknoir-browser-seed.XXXXXX")"
+  chromium_args="$work/chromium.args"
+  mkdir -p "$bin"
+  # shellcheck disable=SC2016 # the stub expands "$@" at run time, not now
+  printf '#!/bin/sh\nprintf "%%s\\n" "$@" >"%s"\nexit 0\n' "$chromium_args" \
+    >"$bin/chromium"
+  printf '#!/bin/sh\nexit 0\n' >"$bin/unshare"
+  printf '#!/bin/sh\nexit 1\n' >"$bin/pgrep"
+  chmod 0755 "$bin/chromium" "$bin/unshare" "$bin/pgrep"
+  local seed_path="$bin:$TEST_PATH" home
+
+  # 1. A new profile: the seed is written, valid JSON, and Chromium starts.
+  home="$work/home-new"
+  profile="$home/.config/chromium-desktop"
+  prefs="$profile/Default/Preferences"
+  mkdir -p "$home"
+  rm -f "$chromium_args"
+  env -i PATH="$seed_path" HOME="$home" bash "$BROWSER" \
+    >"$work/out" 2>"$work/err"
+  rc=$?
+  problems=""
+  if [ "$rc" != 0 ]; then
+    problems+="exit $rc, want 0; "
+  fi
+  if [ ! -e "$chromium_args" ]; then
+    problems+="Chromium was not started; "
+  fi
+  if [ -f "$prefs" ]; then
+    if ! python3 -I -c '
+import json, sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    prefs = json.load(fh)
+if prefs.get("browser", {}).get("custom_chrome_frame") is not False:
+    sys.exit("custom_chrome_frame is not false")
+' "$prefs" >"$work/seed-json.out" 2>&1; then
+      problems+="$(tr '\n' '|' <"$work/seed-json.out"); "
+    fi
+  else
+    problems+="no $prefs; "
+  fi
+  mode="$(stat -c '%a' "$profile/Default" 2>/dev/null || true)"
+  if [ "$mode" != 700 ]; then
+    problems+="the Default dir is mode '$mode', want 700; "
+  fi
+  if [ -z "$problems" ]; then
+    pass browser-profile-seed
+  else
+    fail browser-profile-seed "$problems"
+  fi
+
+  # 2. An existing profile is the user's: byte for byte unchanged.
+  home="$work/home-existing"
+  profile="$home/.config/chromium-desktop"
+  prefs="$profile/Default/Preferences"
+  mkdir -p "$profile/Default"
+  printf '{"profile":{"name":"mine"},"browser":{"custom_chrome_frame":true}}\n' \
+    >"$prefs"
+  cp "$prefs" "$work/prefs.before"
+  rm -f "$chromium_args"
+  env -i PATH="$seed_path" HOME="$home" bash "$BROWSER" \
+    >"$work/out" 2>"$work/err"
+  rc=$?
+  problems=""
+  if [ "$rc" != 0 ]; then
+    problems+="exit $rc, want 0; "
+  fi
+  if [ ! -e "$chromium_args" ]; then
+    problems+="Chromium was not started; "
+  fi
+  if ! cmp -s "$work/prefs.before" "$prefs"; then
+    problems+="the existing Preferences changed; "
+  fi
+  if [ -z "$problems" ]; then
+    pass browser-profile-seed-existing
+  else
+    fail browser-profile-seed-existing "$problems"
+  fi
+
+  # 3. A dry run writes nothing.
+  home="$work/home-dry"
+  rm -f "$chromium_args"
+  env -i PATH="$seed_path" HOME="$home" DESKTOP_DRY_RUN=1 bash "$BROWSER" \
+    >"$work/out" 2>"$work/err"
+  rc=$?
+  problems=""
+  if [ "$rc" != 0 ]; then
+    problems+="exit $rc, want 0; "
+  fi
+  if [ -e "$home/.config/chromium-desktop" ]; then
+    problems+="a dry run wrote $home/.config/chromium-desktop; "
+  fi
+  if [ -z "$problems" ]; then
+    pass browser-profile-seed-dry-run
+  else
+    fail browser-profile-seed-dry-run "$problems"
+  fi
+
+  # 4. A start refused for the sandbox (exit 78) writes nothing.
+  home="$work/home-refused"
+  printf '#!/bin/sh\nexit 1\n' >"$bin/unshare"
+  chmod 0755 "$bin/unshare"
+  rm -f "$chromium_args"
+  env -i PATH="$seed_path" HOME="$home" bash "$BROWSER" \
+    >"$work/out" 2>"$work/err"
+  rc=$?
+  problems=""
+  if [ "$rc" != 78 ]; then
+    problems+="exit $rc, want 78; "
+  fi
+  if [ -e "$home/.config/chromium-desktop" ]; then
+    problems+="a refused start wrote $home/.config/chromium-desktop; "
+  fi
+  if [ -e "$chromium_args" ]; then
+    problems+="Chromium was started; "
+  fi
+  if [ -z "$problems" ]; then
+    pass browser-profile-seed-refused
+  else
+    fail browser-profile-seed-refused "$problems"
+  fi
+  printf '#!/bin/sh\nexit 0\n' >"$bin/unshare"
+  chmod 0755 "$bin/unshare"
+
+  # 5. A home the profile cannot be created under: one warning on stderr and
+  #    Chromium still starts.
+  home="$work/notadir/home"
+  printf 'not a directory\n' >"$work/notadir"
+  rm -f "$chromium_args"
+  env -i PATH="$seed_path" HOME="$home" bash "$BROWSER" \
+    >"$work/out" 2>"$work/err"
+  rc=$?
+  problems=""
+  if [ "$rc" != 0 ]; then
+    problems+="exit $rc, want 0; "
+  fi
+  if [ ! -e "$chromium_args" ]; then
+    problems+="Chromium was not started; "
+  fi
+  if ! grep -qxF "desktop-browser: warning: could not seed the Chromium profile: $home/.config/chromium-desktop" \
+    "$work/err"; then
+    problems+="stderr '$(tr '\n' '|' <"$work/err")', want the seed warning; "
+  fi
+  if [ -z "$problems" ]; then
+    pass browser-profile-seed-readonly
+  else
+    fail browser-profile-seed-readonly "$problems"
+  fi
+
+  rm -rf "$work"
+}
+
 # --- the desktop entries and the app menu -----------------------------------
 
 test_desktop_entries() {
@@ -4285,7 +4418,6 @@ test_council_makefile() {
 test_shellcheck
 test_hadolint
 test_chromium_policy_json
-test_chromium_prefs
 test_xfconf_xml
 test_theme_xml
 test_gtk_theme
@@ -4308,6 +4440,7 @@ test_notice_locale
 test_notice_file
 test_browser_wrapper
 test_browser_live
+test_browser_profile_seed
 test_desktop_entries
 test_manifests
 test_host_unit

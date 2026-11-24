@@ -116,6 +116,29 @@ if [ "$SANDBOX" = off ]; then
   log "warning: the Chromium renderer sandbox is off (DESKTOP_BROWSER_SANDBOX=off); only browse trusted pages"
 fi
 
+# Seed a new profile with browser.custom_chrome_frame=false, so that xfwm4
+# frames Chromium with the Teknoir title bar. Chromium otherwise draws its own
+# client-side frame, which without a compositor paints an opaque grey band and
+# gives no focus cue. /etc/chromium/master_preferences cannot do it: Chromium
+# never imports initial preferences for a profile started with
+# --no-first-run. Only a new profile is seeded; an existing one (a persistent
+# home, or a user who changed the setting) is never touched. A read-only home
+# must not keep the browser from starting, so a failed seed is only a warning.
+PREFS="${PROFILE}/Default/Preferences"
+if [ ! -e "$PREFS" ]; then
+  prefs_tmp="${PREFS}.tmp.$$"
+  # 0700 for every directory created here, as Chromium's own profile dir is
+  # (the subshell keeps the umask from the rest of the script).
+  if (umask 077 && mkdir -p "${PROFILE}/Default") &&
+    printf '%s\n' '{"browser":{"custom_chrome_frame":false}}' >"$prefs_tmp" &&
+    mv -f "$prefs_tmp" "$PREFS"; then
+    :
+  else
+    rm -f "$prefs_tmp"
+    log "warning: could not seed the Chromium profile: ${PROFILE}"
+  fi
+fi
+
 # Chromium handles its own lock when it runs in this pod: a second start hands
 # the URL to the running browser. Remove the Singleton files only when no
 # Chromium of this user is running; then they come from a pod that stopped
