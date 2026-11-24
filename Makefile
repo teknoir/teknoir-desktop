@@ -2,6 +2,8 @@
 #
 #   make test           the whole test suite (no docker, no root)
 #   make lint           shellcheck, hadolint and the config file checks
+#   make theme          regenerate the xfwm4 theme from tools/gen-xfwm4-theme.py
+#   make theme-check    verify the committed xfwm4 theme matches the generator
 #   make image          multi-arch build of ghcr.io/teknoir/teknoir-desktop:dev
 #   make image-council  amd64 build of the council image, :dev-council
 #   make seccomp        regenerate deploy/seccomp/teknoir-desktop.json
@@ -19,7 +21,7 @@ TMP ?= $(or $(TMPDIR),/var/tmp)/teknoir-desktop-seccomp
 TNCTL_REF ?=
 TNCTL_VERSION ?= dev
 
-.PHONY: test lint image image-council seccomp seccomp-check
+.PHONY: test lint theme theme-check image image-council seccomp seccomp-check
 
 test:
 	bash test/run.sh
@@ -27,6 +29,15 @@ test:
 lint:
 	shellcheck -x rootfs/usr/local/bin/* host/* test/*.sh
 	hadolint Dockerfile
+
+# The xfwm4 theme is generated from the nextgen tokens, not hand-painted: the
+# shapes and colours live in tools/gen-xfwm4-theme.py, the output is committed
+# so the image build needs no Python, and theme-check fails when the two drift.
+theme:
+	python3 -I tools/gen-xfwm4-theme.py --out rootfs/usr/share/themes/Teknoir/xfwm4
+
+theme-check:
+	python3 -I tools/gen-xfwm4-theme.py --check rootfs/usr/share/themes/Teknoir/xfwm4
 
 # buildx with two platforms needs a builder that supports them
 # (`docker buildx create --use --name teknoir-multiarch`), and the push is

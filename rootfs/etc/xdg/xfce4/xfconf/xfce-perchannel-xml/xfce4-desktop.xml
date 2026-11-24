@@ -1,26 +1,63 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<!-- A solid dark background (#1f2328) with no desktop icons: the desktop is
-     a workspace to watch, not a place to find files. -->
+<!-- A plain #000000 backdrop. This is nextgen's canvas colour, and the brand
+     sits in the chrome instead: the panel's applications menu shows the mark,
+     the way the nextgen sidebar header does. There is no logo on the desktop
+     for three reasons: a solid frame costs almost nothing in Tight or ZRLE on
+     the first frame and on every window move, while any image is repainted
+     with it; a clean black desktop keeps bot screenshots clean; and an image
+     would need a rasteriser, which the dev host does not have.
+
+     The monitor key is the X connector name, not an index. TigerVNC's Xvnc
+     reports the output as VNC-0, so the path is monitorVNC-0. The file this
+     replaced used monitor0, which never matched under Xvnc, so its colour
+     never applied and the desktop was black by accident, not by design.
+     Renaming the TigerVNC output would silently fall back to xfdesktop's
+     default; the desktop-backdrop test pins the name, and a TigerVNC bump
+     needs a live check.
+
+     There is one entry per workspace (xfwm4.xml sets workspace_count to 2).
+     image-style 0 is no image, color-style 0 is the plain colour, and rgba1
+     and rgba2 are both opaque black. The desktop-icons block stays: it turns
+     every icon class off, so the desktop is a workspace to watch, not a place
+     to find files. -->
 <channel name="xfce4-desktop" version="1.0">
   <property name="backdrop" type="empty">
     <property name="screen0" type="empty">
-      <property name="monitor0" type="empty">
+      <property name="monitorVNC-0" type="empty">
         <property name="workspace0" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="0"/>
           <property name="last-image" type="string" value=""/>
           <property name="image-path" type="string" value=""/>
-          <property name="image-style" type="int" value="3"/>
-          <property name="color-style" type="int" value="0"/>
           <property name="rgba1" type="array">
-            <value type="double" value="0.12156862745098039"/>
-            <value type="double" value="0.13725490196078433"/>
-            <value type="double" value="0.15686274509803921"/>
+            <value type="double" value="0"/>
+            <value type="double" value="0"/>
+            <value type="double" value="0"/>
             <value type="double" value="1"/>
           </property>
           <property name="rgba2" type="array">
-            <value type="double" value="0.12156862745098039"/>
-            <value type="double" value="0.13725490196078433"/>
-            <value type="double" value="0.15686274509803921"/>
+            <value type="double" value="0"/>
+            <value type="double" value="0"/>
+            <value type="double" value="0"/>
+            <value type="double" value="1"/>
+          </property>
+        </property>
+        <property name="workspace1" type="empty">
+          <property name="color-style" type="int" value="0"/>
+          <property name="image-style" type="int" value="0"/>
+          <property name="last-image" type="string" value=""/>
+          <property name="image-path" type="string" value=""/>
+          <property name="rgba1" type="array">
+            <value type="double" value="0"/>
+            <value type="double" value="0"/>
+            <value type="double" value="0"/>
+            <value type="double" value="1"/>
+          </property>
+          <property name="rgba2" type="array">
+            <value type="double" value="0"/>
+            <value type="double" value="0"/>
+            <value type="double" value="0"/>
             <value type="double" value="1"/>
           </property>
         </property>

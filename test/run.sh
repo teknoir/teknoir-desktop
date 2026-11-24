@@ -44,6 +44,11 @@ GTK4_INI="rootfs/etc/gtk-4.0/settings.ini"
 XS_SETTINGS="rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
 FONTS_CONF="rootfs/etc/fonts/local.conf"
 TEKNOIR_MARK="rootfs/usr/share/teknoir/teknoir-mark.svg"
+XFWM4_DIR="$GTK_THEME_DIR/xfwm4"
+XFWM4_XML="rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"
+PANEL_DEFAULT="rootfs/etc/xdg/xfce4/panel/default.xml"
+TERMINAL_XML="rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-terminal.xml"
+DESKTOP_XML="rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml"
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/teknoir-desktop-test.XXXXXX")"
 # Background servers the health-probe tests start.
@@ -160,7 +165,8 @@ test_xfconf_xml() {
 import glob, sys
 from xml.dom import minidom
 
-files = sorted(glob.glob("rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/*.xml"))
+files = sorted(glob.glob("rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/*.xml")
+               + glob.glob("rootfs/etc/xdg/xfce4/panel/*.xml"))
 if not files:
     sys.exit("no xfconf files found")
 for path in files:
@@ -177,11 +183,12 @@ for path in files:
 
 # --- the theme ---------------------------------------------------------------
 #
-# Step 1 of the Teknoir theme: the GTK3 theme, the GTK settings files, the
-# xsettings channel, the fonts and the logo. The xfwm4 theme, the panel, the
-# terminal, the backdrop and the noVNC CSS come in later steps; the palette
-# test already carries the colours those steps need, and gathers the files
-# they paint by appending their paths to its list.
+# Steps 1 and 2 of the Teknoir theme: the GTK3 theme, the GTK settings files,
+# the xsettings channel, the fonts and the logo, then the generated xfwm4
+# theme, the panel layout, the terminal palette, the backdrop and the window
+# manager's channel. The browser side (the noVNC CSS and the notice banner)
+# comes in step 3; the palette test already carries the colours those steps
+# need, and gathers the files they paint by appending their paths to its list.
 
 # The only colours a Teknoir desktop may paint, from the dark tokens of
 # Backstage nextgen (plugins/backstage-plugin-teknoir-fleet/src/theme/tokens.css
@@ -653,14 +660,638 @@ PY
   fi
 }
 
-# Every colour the theme paints is a Teknoir token. Later steps append their
-# files (the xfwm4 theme, the noVNC CSS and the notice script) to this list.
+# Every colour the theme paints is a Teknoir token. Step 3 appends its files
+# (the noVNC CSS and the notice script) to this list.
 test_theme_palette() {
-  local files=("$GTK_CSS" "$TEKNOIR_MARK")
+  local files=("$GTK_CSS" "$TEKNOIR_MARK" "$XFWM4_DIR/themerc"
+    "$PANEL_DEFAULT" "$TERMINAL_XML" "$DESKTOP_XML")
+  local xpm
+  for xpm in "$XFWM4_DIR"/*.xpm; do
+    files+=("$xpm")
+  done
   if theme_palette_scan "${files[@]}"; then
     pass theme-palette
   else
     fail theme-palette "$(tr '\n' '|' <"$TMP/theme-palette.out")"
+  fi
+}
+
+# The window manager's theme. It is generated, so the first test compares the
+# committed files with the generator byte for byte, and the second reads the
+# files as xfwm4 would: a genuine XPM3 parse, every symbolic colour named
+# among xfwm4's 24 keys with a literal that is its themerc value, and the
+# xfconf channel agreeing with themerc on layout and type.
+test_xfwm4_theme() {
+  if python3 -I tools/gen-xfwm4-theme.py --check "$XFWM4_DIR" \
+    >"$TMP/xfwm4-generated.out" 2>&1; then
+    pass xfwm4-theme-generated
+  else
+    fail xfwm4-theme-generated "$(tr '\n' '|' <"$TMP/xfwm4-generated.out")"
+  fi
+
+  if python3 -I - "$XFWM4_DIR" "$XFWM4_XML" >"$TMP/xfwm4-theme.out" 2>&1 <<'PY'
+import os
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+theme_dir, xfwm_xml = sys.argv[1], sys.argv[2]
+
+STATES = ("active", "inactive")
+BUTTON_STATES = ("active", "inactive", "prelight", "pressed")
+KINDS = ("close", "maximize", "hide", "maximize-toggled")
+EDGES = ("left", "right", "bottom", "bottom-left", "bottom-right")
+
+# Every generated file and the size it must have.
+sizes = {}
+for state in STATES:
+    for n in range(1, 6):
+        sizes["title-%d-%s.xpm" % (n, state)] = (1, 30)
+    for corner in ("top-left", "top-right"):
+        sizes["%s-%s.xpm" % (corner, state)] = (1, 30)
+    for edge in EDGES:
+        sizes["%s-%s.xpm" % (edge, state)] = (1, 1)
+for kind in KINDS:
+    for state in BUTTON_STATES:
+        sizes["%s-%s.xpm" % (kind, state)] = (30, 30)
+EXPECTED = sorted(list(sizes) + ["README", "themerc"])
+
+# The spec's themerc, in its order.
+THEMERC_KEYS = [
+    ("button_layout", "|HMC"),
+    ("button_offset", "0"),
+    ("button_spacing", "0"),
+    ("full_width_title", "true"),
+    ("title_alignment", "left"),
+    ("title_horizontal_offset", "10"),
+    ("title_vertical_offset_active", "0"),
+    ("title_vertical_offset_inactive", "0"),
+    ("title_shadow_active", "false"),
+    ("title_shadow_inactive", "false"),
+    ("frame_border_top", "1"),
+    ("maximized_offset", "1"),
+    ("show_app_icon", "false"),
+    ("shadow_opacity", "0"),
+    ("shadow_delta_x", "0"),
+    ("shadow_delta_y", "0"),
+    ("shadow_delta_width", "0"),
+    ("shadow_delta_height", "0"),
+    ("active_text_color", "#F2F1EE"),
+    ("inactive_text_color", "#8C8C8C"),
+    ("active_text_color_2", "#C7C5BF"),
+    ("inactive_text_color_2", "#8C8C8C"),
+    ("active_color_1", "#141414"),
+    ("inactive_color_1", "#000000"),
+    ("active_border_color", "#3D3D3D"),
+    ("inactive_border_color", "#2A2A2A"),
+    ("active_hilight_1", "#1C1C1C"),
+    ("inactive_hilight_1", "#1C1C1C"),
+    ("active_mid_1", "#2A2A2A"),
+    ("inactive_mid_1", "#2A2A2A"),
+]
+
+# xfwm4 honours exactly these 24 colour keys in a theme's XPMs.
+SYMBOLS = set()
+for state in STATES:
+    SYMBOLS |= {state + "_text_color", state + "_text_shadow_color",
+                state + "_border_color", state + "_text_color_2"}
+    for area in ("color", "hilight", "shadow", "mid"):
+        for n in ("1", "2"):
+            SYMBOLS.add("%s_%s_%s" % (state, area, n))
+
+problems = []
+if len(EXPECTED) != 42:
+    problems.append("the expected list has %d names, want 42" % len(EXPECTED))
+if len(SYMBOLS) != 24:
+    problems.append("the symbol set has %d keys, want 24" % len(SYMBOLS))
+
+have = sorted(os.listdir(theme_dir))
+if have != EXPECTED:
+    missing = sorted(set(EXPECTED) - set(have))
+    extra = sorted(set(have) - set(EXPECTED))
+    problems.append("files: %d missing %r, %d extra %r"
+                    % (len(missing), missing[:4], len(extra), extra[:4]))
+
+values = {}
+try:
+    pairs = []
+    with open(os.path.join(theme_dir, "themerc"), encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            key, sep, value = line.partition("=")
+            if not sep:
+                problems.append("themerc: no '=' in %r" % line)
+                continue
+            pairs.append((key.strip(), value.strip()))
+    if pairs != THEMERC_KEYS:
+        problems.append("themerc keys or values differ from the spec")
+    values = dict(pairs)
+except OSError as exc:
+    problems.append("themerc: %s" % exc)
+
+
+def parse(name, want_w, want_h):
+    """Read one XPM as xfwm4's parser would, and report what is wrong."""
+    path = os.path.join(theme_dir, name)
+    with open(path, encoding="utf-8", newline="") as fh:
+        text = fh.read()
+    if "\r" in text:
+        problems.append("%s: CRLF line endings" % name)
+    lines = text.split("\n")
+    if lines[-1] != "":
+        problems.append("%s: does not end with a newline" % name)
+        lines.append("")
+    lines = lines[:-1]
+
+    if len(lines) < 4:
+        problems.append("%s: only %d lines" % (name, len(lines)))
+        return
+    if lines[0] != "/* XPM */":
+        problems.append("%s: first line is %r" % (name, lines[0]))
+    ident = name[:-4].replace("-", "_") + "_xpm"
+    if lines[1] != "static char * %s[] = {" % ident:
+        problems.append("%s: declaration is %r, want %r"
+                        % (name, lines[1], "static char * %s[] = {" % ident))
+    match = re.match(r'^"(\d+) (\d+) (\d+) (\d+)",$', lines[2])
+    if not match:
+        problems.append("%s: size line is %r" % (name, lines[2]))
+        return
+    width, height, ncolors, cpp = (int(v) for v in match.groups())
+    if (width, height) != (want_w, want_h):
+        problems.append("%s: is %dx%d, want %dx%d"
+                        % (name, width, height, want_w, want_h))
+    if cpp != 1:
+        problems.append("%s: %d chars per pixel, want 1" % (name, cpp))
+
+    colour_lines = lines[3:3 + ncolors]
+    rows = lines[3 + ncolors:3 + ncolors + height]
+    if lines[3 + ncolors + height:] != ["};"]:
+        problems.append("%s: the file does not end in '};' after %d rows"
+                        % (name, height))
+    if len(colour_lines) != ncolors:
+        problems.append("%s: %d colour lines, header says %d"
+                        % (name, len(colour_lines), ncolors))
+
+    palette = {}
+    for line in colour_lines:
+        entry = re.match(r'^"(.)\tc (#[0-9A-Fa-f]{6}) s (\w+)",$', line)
+        if not entry:
+            problems.append("%s: cannot read colour line %r" % (name, line))
+            continue
+        char, literal, symbol = entry.group(1), entry.group(2), entry.group(3)
+        palette[char] = symbol
+        if symbol not in SYMBOLS:
+            problems.append("%s: %r is not an xfwm4 colour key" % (name, symbol))
+        elif values.get(symbol, "").upper() != literal.upper():
+            problems.append("%s: %s literal %s, themerc says %s"
+                            % (name, symbol, literal, values.get(symbol)))
+    if len(palette) != ncolors:
+        problems.append("%s: %d pixel characters, header says %d colours"
+                        % (name, len(palette), ncolors))
+
+    if len(rows) != height:
+        problems.append("%s: %d rows, header says %d" % (name, len(rows), height))
+        return
+    for index, row in enumerate(rows):
+        match = re.match(r'^"([^"]*)",$', row)
+        if not match:
+            problems.append("%s: cannot read row %r" % (name, row))
+            continue
+        pixels = match.group(1)
+        if len(pixels) != width:
+            problems.append("%s: a row is %d wide, header says %d"
+                            % (name, len(pixels), width))
+        for char in pixels:
+            if char not in palette:
+                problems.append("%s: pixel %r is not in the palette" % (name, char))
+                break
+        if index == 0:
+            # Row 0 is the top border in every title, top, edge and button.
+            first = {palette.get(char) for char in pixels}
+            if None in first or not all(s.endswith("_border_color") for s in first):
+                problems.append("%s: row 0 is not all border colour" % name)
+
+
+for name, (want_w, want_h) in sorted(sizes.items()):
+    if os.path.isfile(os.path.join(theme_dir, name)):
+        parse(name, want_w, want_h)
+
+# The xfconf channel must ask for this theme and repeat its layout, so a user
+# copy or a theme swap cannot leave the title bar and the frame disagreeing.
+props = {}
+
+
+def walk(el):
+    for child in el.findall("property"):
+        if child.get("type") == "empty":
+            walk(child)
+        else:
+            props[child.get("name")] = child.get("value")
+
+
+walk(ET.parse(xfwm_xml).getroot())
+if props.get("theme") != "Teknoir":
+    problems.append("xfwm4.xml theme is %r, want 'Teknoir'" % (props.get("theme"),))
+for key in ("button_layout", "title_alignment"):
+    if props.get(key) != values.get(key):
+        problems.append("xfwm4.xml %s is %r, themerc says %r"
+                        % (key, props.get(key), values.get(key)))
+if not (props.get("title_font") or "").startswith("Hanken Grotesk"):
+    problems.append("xfwm4.xml title_font is %r" % (props.get("title_font"),))
+
+if problems:
+    sys.exit("; ".join(problems[:10]))
+PY
+  then
+    pass xfwm4-theme
+  else
+    fail xfwm4-theme "$(tr '\n' '|' <"$TMP/xfwm4-theme.out")"
+  fi
+}
+
+# The panel layout: one top bar of six known plugins, no actions plugin (its
+# log-out would end the bot's session), no tray, and a pager that tracks the
+# number of workspaces xfwm4 actually has.
+test_panel_config() {
+  if python3 -I - "$PANEL_DEFAULT" "$XFWM4_XML" "$TEKNOIR_MARK" \
+    >"$TMP/panel-config.out" 2>&1 <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+panel_path, xfwm_path, mark = sys.argv[1], sys.argv[2], sys.argv[3]
+
+# What each plugin id must be, and every property the spec gives it, as
+# (name, xfconf type, value).
+PLUGINS = {
+    1: ("applicationsmenu", [
+        ("button-icon", "string", "/usr/share/teknoir/teknoir-mark.svg"),
+        ("show-button-title", "bool", "false"),
+        ("show-generic-names", "bool", "false"),
+        ("button-title", "string", "Applications"),
+    ]),
+    2: ("tasklist", [
+        ("grouping", "uint", "0"),
+        ("flat-buttons", "bool", "true"),
+        ("show-handle", "bool", "false"),
+        ("show-labels", "bool", "true"),
+        ("include-all-workspaces", "bool", "false"),
+        ("show-wireframes", "bool", "false"),
+    ]),
+    3: ("separator", [
+        ("expand", "bool", "true"),
+        ("style", "uint", "0"),
+    ]),
+    4: ("pager", [
+        ("miniature-view", "bool", "false"),
+        ("rows", "uint", "1"),
+    ]),
+    5: ("separator", [
+        ("style", "uint", "0"),
+    ]),
+    6: ("clock", [
+        ("mode", "uint", "2"),
+        ("digital-layout", "uint", "3"),
+        ("digital-time-format", "string", "%H:%M"),
+        ("tooltip-format", "string", "%A %d %B %Y"),
+    ]),
+}
+
+problems = []
+
+
+def prop(el, name):
+    return None if el is None else el.find("property[@name='%s']" % name)
+
+
+def want(el, name, kind, value, where):
+    node = prop(el, name)
+    if node is None:
+        problems.append("%s: no %s" % (where, name))
+    elif node.get("type") != kind or node.get("value") != value:
+        problems.append("%s: %s is %s %r, want %s %r"
+                        % (where, name, node.get("type"), node.get("value"),
+                           kind, value))
+
+
+root = ET.parse(panel_path).getroot()
+configver = prop(root, "configver")
+if configver is None or configver.get("type") != "int" or configver.get("value") != "2":
+    problems.append("configver is not int 2")
+
+panels = prop(root, "panels")
+if panels is None or panels.get("type") != "array":
+    sys.exit("panels is not an array")
+panel_ids = [v.get("value") for v in panels.findall("value")]
+if panel_ids != ["1"]:
+    problems.append("panels is %r, want ['1']" % (panel_ids,))
+
+dark = prop(panels, "dark-mode")
+if dark is None or dark.get("type") != "bool" or dark.get("value") != "true":
+    problems.append("/panels/dark-mode is not bool true")
+
+panel = prop(panels, "panel-1")
+if panel is None:
+    sys.exit("no panel-1")
+position = prop(panel, "position")
+if position is None or not (position.get("value") or "").startswith("p=6"):
+    problems.append("panel-1 position does not start p=6")
+want(panel, "length", "uint", "100", "panel-1")
+want(panel, "position-locked", "bool", "true", "panel-1")
+want(panel, "size", "uint", "40", "panel-1")
+want(panel, "icon-size", "uint", "20", "panel-1")
+want(panel, "nrows", "uint", "1", "panel-1")
+want(panel, "mode", "uint", "0", "panel-1")
+want(panel, "background-style", "uint", "0", "panel-1")
+
+plugin_ids = prop(panel, "plugin-ids")
+if plugin_ids is None:
+    problems.append("panel-1 has no plugin-ids")
+    ids = []
+else:
+    ids = [v.get("value") for v in plugin_ids.findall("value")]
+    if ids != [str(i) for i in sorted(PLUGINS)]:
+        problems.append("plugin-ids is %r, want 1..6" % (ids,))
+
+plugins = prop(root, "plugins")
+if plugins is None:
+    sys.exit("no plugins")
+for index, (kind, checks) in sorted(PLUGINS.items()):
+    node = prop(plugins, "plugin-%d" % index)
+    if node is None:
+        problems.append("plugins: no plugin-%d" % index)
+        continue
+    if node.get("type") != "string" or node.get("value") != kind:
+        problems.append("plugin-%d is %r, want %r"
+                        % (index, node.get("value"), kind))
+    for name, xtype, value in checks:
+        want(node, name, xtype, value, "plugin-%d" % index)
+
+# A plugin value must not be a tray owner or the session-ending actions menu.
+for node in plugins.findall("property"):
+    if node.get("value") in ("actions", "systray"):
+        problems.append("plugins: %s is %s" % (node.get("name"), node.get("value")))
+
+icon = "/usr/share/teknoir/teknoir-mark.svg"
+if not os.path.isfile(os.path.join("rootfs", icon.lstrip("/"))):
+    problems.append("the panel button icon %s is not in rootfs" % icon)
+
+general = prop(ET.parse(xfwm_path).getroot(), "general")
+count_node = prop(general, "workspace_count")
+names_node = prop(general, "workspace_names")
+if count_node is None or names_node is None:
+    problems.append("xfwm4.xml has no workspace_count or workspace_names")
+else:
+    count = int(count_node.get("value"))
+    names = [v.get("value") for v in names_node.findall("value")]
+    if len(names) != count:
+        problems.append("workspace_names has %d values, workspace_count is %d"
+                        % (len(names), count))
+
+if problems:
+    sys.exit("; ".join(problems[:10]))
+PY
+  then
+    pass panel-config
+  else
+    fail panel-config "$(tr '\n' '|' <"$TMP/panel-config.out")"
+  fi
+}
+
+# The terminal channel: the tokens, the pinned monospace font, no scrollbar,
+# and a 16-entry palette whose six brights are their bases mixed 30% toward
+# white, every colour but the line readable on black.
+test_terminal_config() {
+  if python3 -I - "$TERMINAL_XML" >"$TMP/terminal-config.out" 2>&1 <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+props = {p.get("name"): p for p in root.findall("property")}
+
+CHECKS = [
+    ("color-foreground", "string", "#F2F1EE"),
+    ("color-background", "string", "#000000"),
+    ("color-cursor", "string", "#8CA7F2"),
+    ("color-cursor-use-default", "bool", "false"),
+    ("color-selection", "string", "#FFFFFF"),
+    ("color-selection-background", "string", "#3B61BF"),
+    ("color-selection-use-default", "bool", "false"),
+    ("color-bold-is-bright", "bool", "false"),
+    ("font-use-system", "bool", "false"),
+    ("font-name", "string", "JetBrains Mono 10"),
+    ("scrolling-bar", "string", "TERMINAL_SCROLLBAR_NONE"),
+    ("misc-menubar-default", "bool", "false"),
+    ("misc-default-geometry", "string", "100x30"),
+]
+
+problems = []
+for name, kind, value in CHECKS:
+    node = props.get(name)
+    if node is None:
+        problems.append("no %s" % name)
+    elif node.get("type") != kind or node.get("value") != value:
+        problems.append("%s is %s %r, want %s %r"
+                        % (name, node.get("type"), node.get("value"), kind, value))
+
+palette_node = props.get("color-palette")
+if palette_node is None or palette_node.get("type") != "string":
+    sys.exit("color-palette is missing or not a string")
+palette = palette_node.get("value").split(";")
+if len(palette) != 16:
+    problems.append("the palette has %d entries, want 16" % len(palette))
+
+
+def mix30(value):
+    """The bright rule: each channel 30% of the way to #FFFFFF, rounded."""
+    channels = [int(value[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#%02X%02X%02X" % tuple(
+        round(c + (255 - c) * 0.3) for c in channels)
+
+
+if len(palette) == 16:
+    # Brights at 9..14 come from the bases at 1..6.
+    for index in range(9, 15):
+        want_bright = mix30(palette[index - 8])
+        if palette[index].upper() != want_bright:
+            problems.append("palette[%d] is %s, the rule gives %s"
+                            % (index, palette[index], want_bright))
+
+
+def luminance(value):
+    def linear(channel):
+        channel = channel / 255.0
+        if channel <= 0.04045:
+            return channel / 12.92
+        return ((channel + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (int(value[i:i + 2], 16) for i in (1, 3, 5))
+    return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+
+
+def contrast(one, other):
+    first, second = sorted((luminance(one), luminance(other)), reverse=True)
+    return (first + 0.05) / (second + 0.05)
+
+
+if len(palette) == 16:
+    for index, value in enumerate(palette):
+        # Index 0 is the line colour, a background by design; the rest are
+        # text and must be readable.
+        if index == 0:
+            continue
+        ratio = contrast(value, "#000000")
+        if ratio < 4.5:
+            problems.append("palette[%d] %s is %.2f:1 on black"
+                            % (index, value, ratio))
+
+if problems:
+    sys.exit("; ".join(problems[:10]))
+PY
+  then
+    pass terminal-config
+  else
+    fail terminal-config "$(tr '\n' '|' <"$TMP/terminal-config.out")"
+  fi
+}
+
+# The backdrop: the monitor key is the connector name TigerVNC reports
+# (VNC-0), one black workspace per xfwm4 workspace, no image.
+test_desktop_backdrop() {
+  if python3 -I - "$DESKTOP_XML" "$XFWM4_XML" >"$TMP/desktop-backdrop.out" 2>&1 <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+desktop_path, xfwm_path = sys.argv[1], sys.argv[2]
+
+problems = []
+
+
+def prop(el, name):
+    return None if el is None else el.find("property[@name='%s']" % name)
+
+
+def want(el, name, kind, value, where):
+    node = prop(el, name)
+    if node is None:
+        problems.append("%s: no %s" % (where, name))
+    elif node.get("type") != kind or node.get("value") != value:
+        problems.append("%s: %s is %s %r, want %s %r"
+                        % (where, name, node.get("type"), node.get("value"),
+                           kind, value))
+
+
+root = ET.parse(desktop_path).getroot()
+screen0 = prop(prop(root, "backdrop"), "screen0")
+if screen0 is None:
+    sys.exit("no backdrop/screen0")
+monitors = [child.get("name") for child in screen0.findall("property")]
+if "monitorVNC-0" not in monitors:
+    problems.append("no monitorVNC-0 (has %r)" % (monitors,))
+if "monitor0" in monitors:
+    problems.append("monitor0 is still there; TigerVNC never uses that name")
+monitor = prop(screen0, "monitorVNC-0")
+
+general = prop(ET.parse(xfwm_path).getroot(), "general")
+count_node = prop(general, "workspace_count")
+count = int(count_node.get("value")) if count_node is not None else 0
+if count <= 0:
+    problems.append("xfwm4.xml has no usable workspace_count")
+
+for index in range(count):
+    name = "workspace%d" % index
+    workspace = prop(monitor, name)
+    if workspace is None:
+        problems.append("no %s" % name)
+        continue
+    for key, kind, value in (
+            ("color-style", "int", "0"),
+            ("image-style", "int", "0"),
+            ("last-image", "string", ""),
+            ("image-path", "string", "")):
+        want(workspace, key, kind, value, name)
+    for key in ("rgba1", "rgba2"):
+        node = prop(workspace, key)
+        if node is None:
+            problems.append("%s: no %s" % (name, key))
+            continue
+        values = [float(v.get("value")) for v in node.findall("value")]
+        if values != [0.0, 0.0, 0.0, 1.0]:
+            problems.append("%s: %s is %r, want [0,0,0,1]" % (name, key, values))
+
+if problems:
+    sys.exit("; ".join(problems[:10]))
+PY
+  then
+    pass desktop-backdrop
+  else
+    fail desktop-backdrop "$(tr '\n' '|' <"$TMP/desktop-backdrop.out")"
+  fi
+}
+
+# The pairs the desktop paints that must stay readable: WCAG AA at 4.5:1.
+# A list, so step 3 appends the banner's pairs.
+test_theme_contrast() {
+  if python3 -I - >"$TMP/theme-contrast.out" 2>&1 <<'PY'
+import re
+import sys
+
+PAIRS = [
+    ("#F2F1EE", "#141414"),                # active title text on surface
+    ("#8C8C8C", "#000000"),                # inactive title text on bg
+    ("#C7C5BF", "#141414"),                # button glyph on the active fill
+    ("#FFFFFF", "#3B61BF"),                # on-accent on the accent
+    ("#FFFFFF", "#426DD6"),                # on-accent on accent hover
+    ("#F2F1EE", "#171717"),                # menu text on pop
+    ("#F2F1EE", "rgba(59,97,191,0.35)"),   # selected row over black
+]
+
+
+def channels(value):
+    """A colour as (r, g, b); an rgba() is composited over black."""
+    if value.startswith("#"):
+        return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+    match = re.match(r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([0-9.]+)\s*\)$",
+                     value)
+    if not match:
+        raise ValueError("cannot read %r" % (value,))
+    r, g, b, alpha_text = match.groups()
+    alpha = float(alpha_text)
+    return tuple(round(int(channel) * alpha) for channel in (r, g, b))
+
+
+def luminance(value):
+    def linear(channel):
+        channel = channel / 255.0
+        if channel <= 0.04045:
+            return channel / 12.92
+        return ((channel + 0.055) / 1.055) ** 2.4
+
+    r, g, b = channels(value)
+    return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+
+
+def contrast(one, other):
+    first, second = sorted((luminance(one), luminance(other)), reverse=True)
+    return (first + 0.05) / (second + 0.05)
+
+
+problems = []
+for foreground, background in PAIRS:
+    ratio = contrast(foreground, background)
+    if ratio < 4.5:
+        problems.append("%s on %s is %.2f:1" % (foreground, background, ratio))
+if problems:
+    sys.exit("; ".join(problems))
+
+print("%d pairs at or above 4.5:1" % len(PAIRS))
+PY
+  then
+    pass theme-contrast
+  else
+    fail theme-contrast "$(tr '\n' '|' <"$TMP/theme-contrast.out")"
   fi
 }
 
@@ -3292,6 +3923,11 @@ test_gtk_settings
 test_fonts
 test_dockerfile_theme_packages
 test_theme_palette
+test_xfwm4_theme
+test_panel_config
+test_terminal_config
+test_desktop_backdrop
+test_theme_contrast
 test_seccomp_profile
 test_novnc_extra
 test_dockerfile_dev_shm
