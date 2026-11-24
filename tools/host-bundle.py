@@ -34,9 +34,11 @@ is deterministic: the same tree gives the same bytes.
 
 Exit status: 0 on success, 2 on a usage or configuration error (a dirty tree, a
 foreign entry in --out, a malformed Dockerfile, a source file git would not
-publish), 1 when a font's sha256 does not match the pin. A failed run leaves
-the previous bundle in --out as it was; if restoring it fails, the backup
-directory next to --out is kept and its path is printed.
+publish) and on an I/O error while creating the temporary directory or
+building the bundle (an unwritable parent, a full disk), 1 when a font's
+sha256 does not match the pin. A failed run leaves the previous bundle in
+--out as it was; if restoring it fails, the backup directory next to --out is
+kept and its path is printed.
 """
 
 import argparse
@@ -44,6 +46,7 @@ import hashlib
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -500,12 +503,19 @@ def replace_out(out, stage):
     """Move the managed entries of `stage` into `out`, the old ones aside first.
 
     The old entries are parked in a directory next to --out (same filesystem,
-    so the renames are cheap and atomic). Any failure - an OSError, Ctrl-C, a
-    SystemExit - moves back out the entries that already went in, then moves
-    the parked old entries home again, so the previous bundle is whole and the
-    run can simply be repeated. If even that restore fails, the backup
-    directory is kept (and reported on the way out, see LEFTOVERS): the old
-    bytes then still exist, in a place the message names.
+    so the renames are cheap and atomic). SIGINT, SIGTERM and SIGHUP are
+    blocked from the first rename until the replace has fully settled, so one
+    of them cannot land between a rename and the bookkeeping that records it;
+    the previous mask is restored in a finally, which delivers any pending
+    signal then, when --out is consistent again.
+
+    Any failure - an OSError, Ctrl-C, a SystemExit - moves back out the entries
+    that already went in, then moves the parked old entries home again, so the
+    previous bundle is whole and the run can simply be repeated. The backup is
+    never deleted recursively: after a successful restore it is empty and is
+    removed with rmdir, and anything still inside it (an entry whose restore
+    failed) keeps the directory, which is named in LEFTOVERS and on the way
+    out - the old bytes then still exist, in a place the message names.
     """
     parent = os.path.dirname(out)
     backup = tempfile.mkdtemp(prefix=".host-bundle-old.", dir=parent)
@@ -529,43 +539,67 @@ def replace_out(out, stage):
             raise KeyboardInterrupt("HOST_BUNDLE_TEST_FAIL_AT=%s" % fail_at)
         os.replace(source, dest)
 
+    # A signal that lands between a rename and its append would leave that
+    # entry untracked, and a rollback that "succeeds" would then remove the
+    # backup with the old entry still in it. Block the three signals that stop
+    # or interrupt a run for the whole replace; the finally restores the
+    # previous mask, and only then is a pending one delivered, when --out has
+    # been settled one way or the other.
+    old_mask = signal.pthread_sigmask(
+        signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+    )
     try:
-        for name in MANAGED:
-            current = os.path.join(out, name)
-            if os.path.lexists(current):
-                rename(current, os.path.join(backup, name))
-                moved_out.append(name)
-        for name in MANAGED:
-            incoming = os.path.join(stage, name)
-            if os.path.lexists(incoming):
-                rename(incoming, os.path.join(out, name))
-                moved_in.append(name)
-    except BaseException as exc:
-        restored = True
-        for name in moved_in:
-            current = os.path.join(out, name)
-            try:
-                if os.path.isdir(current) and not os.path.islink(current):
-                    shutil.rmtree(current)
-                else:
-                    os.unlink(current)
-            except OSError:
-                restored = False
-        for name in moved_out:
-            try:
-                os.replace(os.path.join(backup, name), os.path.join(out, name))
-            except OSError:
-                restored = False
-        if restored:
-            discard(backup)
-        else:
+        try:
+            for name in MANAGED:
+                current = os.path.join(out, name)
+                if os.path.lexists(current):
+                    rename(current, os.path.join(backup, name))
+                    moved_out.append(name)
+            for name in MANAGED:
+                incoming = os.path.join(stage, name)
+                if os.path.lexists(incoming):
+                    rename(incoming, os.path.join(out, name))
+                    moved_in.append(name)
+        except BaseException as exc:
+            # Until the backup is gone it may hold old entries: name it in
+            # LEFTOVERS first, so a second interrupt or a crash during the
+            # rollback below still reports it, and drop it again only once it
+            # has been removed.
             LEFTOVERS.append(backup)
-        if isinstance(exc, OSError):
-            die("cannot replace the bundle in %s: %s" % (out, exc))
-        # A KeyboardInterrupt or SystemExit is the caller's to handle; the old
-        # bundle is back, so it may be re-raised as it is.
-        raise
-    discard(backup)
+            for name in moved_in:
+                current = os.path.join(out, name)
+                try:
+                    if os.path.isdir(current) and not os.path.islink(current):
+                        shutil.rmtree(current)
+                    else:
+                        os.unlink(current)
+                except OSError:
+                    pass
+            for name in moved_out:
+                try:
+                    os.replace(os.path.join(backup, name), os.path.join(out, name))
+                except OSError:
+                    pass
+            # Never rmtree the backup: a rollback that put every entry back
+            # left it empty, so rmdir succeeds and the old bundle is home; an
+            # entry whose restore failed keeps it, and its path stays in
+            # LEFTOVERS for the message on the way out.
+            try:
+                os.rmdir(backup)
+            except OSError:
+                pass
+            else:
+                LEFTOVERS.remove(backup)
+            if isinstance(exc, OSError):
+                die("cannot replace the bundle in %s: %s" % (out, exc))
+            # A KeyboardInterrupt or SystemExit is the caller's to handle; the
+            # old bundle is back, so it may be re-raised as it is.
+            raise
+        # Every rename went through: what the backup holds is the previous
+        # bundle's entries, which nothing needs any more.
+        discard(backup)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
 
 
 def main(argv):
@@ -619,16 +653,25 @@ def main(argv):
     data = load_fonts(fonts, os.path.abspath(args.fonts_from) if args.fonts_from else None)
 
     # Build next to --out, so the moves into it are renames on one filesystem.
+    # A parent the tool cannot write, or a disk that fills up while the stage
+    # is built, is a configuration error like the rest: exit 2 and one message,
+    # never a traceback with exit 1 (which is the font mismatch's).
     parent = os.path.dirname(out)
-    tmp = tempfile.mkdtemp(prefix=".host-bundle.", dir=parent)
     try:
-        stage = os.path.join(tmp, "bundle")
-        make_dir(stage)
-        count = build(stage, data, commit, dirty)
-        if not os.path.isdir(out):
-            os.mkdir(out)
-            os.chmod(out, 0o755)
-        replace_out(out, stage)
+        tmp = tempfile.mkdtemp(prefix=".host-bundle.", dir=parent)
+    except OSError as exc:
+        die("cannot create a temporary directory in %s: %s" % (parent, exc))
+    try:
+        try:
+            stage = os.path.join(tmp, "bundle")
+            make_dir(stage)
+            count = build(stage, data, commit, dirty)
+            if not os.path.isdir(out):
+                os.mkdir(out)
+                os.chmod(out, 0o755)
+            replace_out(out, stage)
+        except OSError as exc:
+            die("cannot build the bundle next to %s: %s" % (out, exc))
     finally:
         discard(tmp)
 

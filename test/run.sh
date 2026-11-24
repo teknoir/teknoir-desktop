@@ -2165,6 +2165,184 @@ PY
     fail theme-migrate-empty-parent "$problems"
   fi
 
+  # 12. The CR fix, on Python 3.8's serialiser. A current Python already writes
+  # a CR in an attribute as &#13;, so the fixture above passes even with the
+  # sentinel code deleted; 3.8 writes it as &#10; (a newline) instead. The
+  # program is taken from the script and run in-process with 3.8's
+  # _escape_attrib in place, and its bytes must equal the ones the running
+  # Python writes: the same bytes on every version, CR, CRLF, tab and LF in a
+  # kept attribute. The program is also checked for ET.indent, which 3.8 lacks.
+  if python3 -I - "$MIGRATE" "$work/cr" >"$work/cr.out" 2>&1 <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+script_path, work = sys.argv[1], sys.argv[2]
+with open(script_path, encoding="utf-8") as fh:
+    script = fh.read()
+
+# The inline program, taken from the script exactly as bash passes it to
+# python3 -c: between the opening quote and the quote that closes it.
+marker = "python3 -I -c '"
+start = script.find(marker)
+if start < 0:
+    sys.exit("the migration runs no inline python3 -c program")
+start += len(marker)
+if script[start] != "\n":
+    sys.exit("the inline program does not start on its own line")
+start += 1
+end = script.find("\n' \"", start)
+if end < 0:
+    sys.exit("the inline program has no closing quote line")
+program = script[start:end]
+
+problems = []
+# A call, not a mention: the program's own comment names ET.indent() to say
+# why it does not use it, so comment-only lines are skipped.
+code_lines = [line for line in program.splitlines()
+              if not line.lstrip().startswith("#")]
+if any(".indent(" in line for line in code_lines):
+    problems.append("the inline program calls .indent(, which Python 3.8 lacks")
+
+
+def escape_attrib_38(text):
+    """CPython 3.8's xml.etree.ElementTree._escape_attrib."""
+    if "&" in text:
+        text = text.replace("&", "&amp;")
+    if "<" in text:
+        text = text.replace("<", "&lt;")
+    if ">" in text:
+        text = text.replace(">", "&gt;")
+    if "\"" in text:
+        text = text.replace("\"", "&quot;")
+    if "\r\n" in text:
+        text = text.replace("\r\n", "\n")
+    if "\r" in text:
+        text = text.replace("\r", "\n")
+    if "\n" in text:
+        text = text.replace("\n", "&#10;")
+    if "\t" in text:
+        text = text.replace("\t", "&#09;")
+    return text
+
+
+# A channel file as xfconfd writes it: a property the theme drops, and kept
+# properties whose values hold a CR, a CRLF, a tab and an LF.
+FIXTURE = """<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="Default"/>
+    <property name="snap_width" type="string" value="a&#13;b&#10;c&#9;d"/>
+    <property name="mixed" type="string" value="x&#13;&#10;y"/>
+    <property name="focus_delay" type="int" value="250"/>
+  </property>
+</channel>
+"""
+
+
+def run(label, escape):
+    home = os.path.join(work, label)
+    xml_dir = os.path.join(home, ".config", "xfce4", "xfconf",
+                           "xfce-perchannel-xml")
+    os.makedirs(xml_dir)
+    path = os.path.join(xml_dir, "xfwm4.xml")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(FIXTURE)
+    saved = ET._escape_attrib
+    ET._escape_attrib = escape
+    argv = sys.argv
+    sys.argv = ["desktop-theme-migrate", home, xml_dir]
+    try:
+        exec(compile(program, script_path, "exec"), {"__name__": "__main__"})
+    except SystemExit as exc:
+        if exc.code not in (None, 0):
+            problems.append("%s: the inline program exited %r"
+                            % (label, exc.code))
+    finally:
+        sys.argv = argv
+        ET._escape_attrib = saved
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+data_38 = run("home-py38-escape", escape_attrib_38)
+data_now = run("home-current", ET._escape_attrib)
+
+# The bytes the running Python writes are the expected ones: a CR is &#13;
+# next to the &#10; of an LF and the &#09; of a tab, never a newline.
+if b'value="a&#13;b&#10;c&#09;d"' not in data_now:
+    problems.append("the running Python wrote %r" % (data_now,))
+if b'value="x&#13;&#10;y"' not in data_now:
+    problems.append("the CRLF value is %r" % (data_now,))
+# And 3.8's serialiser gives exactly the same bytes: this is what fails with
+# the CR sentinel deleted, and what no other test catches.
+if data_38 != data_now:
+    problems.append("Python 3.8's serialiser writes different bytes: %r"
+                    % (data_38,))
+if b"\r" in data_38:
+    problems.append("a raw CR is in the output")
+root = ET.fromstring(data_38)
+values = {prop.get("name"): prop.get("value") for prop in root.iter("property")}
+if values.get("snap_width") != "a\rb\nc\td":
+    problems.append("snap_width reads back %r" % (values.get("snap_width"),))
+if values.get("mixed") != "x\r\ny":
+    problems.append("mixed reads back %r" % (values.get("mixed"),))
+if "theme" in values:
+    problems.append("the theme property survived")
+if values.get("focus_delay") != "250":
+    problems.append("focus_delay reads back %r" % (values.get("focus_delay"),))
+
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    pass theme-migrate-cr-escaped
+  else
+    fail theme-migrate-cr-escaped "$(tr '\n' '|' <"$work/cr.out")"
+  fi
+
+  # 13. A real Python 3.8 (Ubuntu 20.04, JetPack 5) writes the same &#13; for
+  # the whitespace fixture test 1 checks, run through the whole script.
+  local py38
+  py38="$(command -v python3.8 2>/dev/null || true)"
+  if [ -z "$py38" ]; then
+    skip theme-migrate-py38 "python3.8 is not on PATH"
+  else
+    home="$work/home-real-py38"
+    xml="$home/.config/xfce4/xfconf/xfce-perchannel-xml"
+    mkdir -p "$xml" "$work/py38-bin"
+    ln -sf "$py38" "$work/py38-bin/python3"
+    cat >"$xml/xfwm4.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="Default"/>
+    <property name="snap_width" type="string" value="10&#9;tab&#10;line&#13;cr"/>
+    <property name="focus_delay" type="int" value="250"/>
+  </property>
+</channel>
+EOF
+    env -i PATH="$work/py38-bin:$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+      >"$work/py38.out" 2>"$work/py38.err"
+    rc=$?
+    problems=""
+    if [ "$rc" != 0 ]; then
+      problems+="exit $rc, stderr '$(tr '\n' '|' <"$work/py38.err")'; "
+    fi
+    if ! grep -qF 'value="10&#09;tab&#10;line&#13;cr"' "$xml/xfwm4.xml"; then
+      problems+="the CR in snap_width did not round-trip: $(tr '\n' '|' <"$xml/xfwm4.xml"); "
+    fi
+    grep -q 'name="theme"' "$xml/xfwm4.xml" && problems+="the theme property survived; "
+    grep -q 'name="focus_delay"' "$xml/xfwm4.xml" || problems+="focus_delay is gone; "
+    if [ -z "$problems" ]; then
+      pass theme-migrate-py38
+    else
+      fail theme-migrate-py38 "$problems"
+    fi
+  fi
+
   rm -rf "$work"
 }
 
@@ -3821,9 +3999,18 @@ test_host_session_theme() {
   for f in mkdir od tr rm chgrp chmod hostname sleep env python3 id; do
     ln -sf "$(command -v "$f")" "$tools_dir/$f"
   done
-  # The two pgrep outcomes the theme switch has to tell apart.
-  printf '#!/bin/sh\nexit 0\n' >"$pgrep_running/pgrep"
-  printf '#!/bin/sh\nexit 1\n' >"$pgrep_idle/pgrep"
+  # The two pgrep outcomes the theme switch has to tell apart; each records
+  # its arguments in $PGREP_LOG, so the test can assert the exact query.
+  cat >"$pgrep_running/pgrep" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >>"$PGREP_LOG"
+exit 0
+SH
+  cat >"$pgrep_idle/pgrep" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >>"$PGREP_LOG"
+exit 1
+SH
   chmod 0755 "$pgrep_running/pgrep" "$pgrep_idle/pgrep"
   printf '#!/bin/sh\nexit 0\n' >"$tools_dir/xauth"
   cat >"$tools_dir/dbus-launch" <<'SH'
@@ -3972,12 +4159,15 @@ SH
   mkdir -p "$home" "$rundir"
   out="$(theme_session_run "$xfce_bin:$pgrep_running:$tools_dir" "$home" "$rundir" \
     SESSION_ENV="$envfile" THEME_ORDER="$order" \
+    PGREP_LOG="$base/pgrep-running.log" \
     TEKNOIR_DESKTOP_THEME=teknoir \
     TEKNOIR_DESKTOP_THEME_XDG="$xdg" \
     TEKNOIR_DESKTOP_THEME_MIGRATE="$migrate_ok" 2>&1)"
   rc=$?
   problems=""
   [ "$rc" = 0 ] || problems+="exit $rc, want 0; "
+  [ "$(cat "$base/pgrep-running.log" 2>/dev/null)" = "-u $(id -u) -x xfconfd" ] ||
+    problems+="pgrep got '$(tr '\n' '|' <"$base/pgrep-running.log" 2>/dev/null)', want '-u $(id -u) -x xfconfd'; "
   if [ "$(tr '\n' ' ' <"$order" 2>/dev/null)" = "migrate session " ]; then
     problems+="the migration ran under a running XFCE session; "
   fi
@@ -3999,12 +4189,15 @@ SH
   mkdir -p "$home" "$rundir"
   out="$(theme_session_run "$xfce_bin:$pgrep_idle:$tools_dir" "$home" "$rundir" \
     SESSION_ENV="$envfile" THEME_ORDER="$order" \
+    PGREP_LOG="$base/pgrep-idle.log" \
     TEKNOIR_DESKTOP_THEME=teknoir \
     TEKNOIR_DESKTOP_THEME_XDG="$xdg" \
     TEKNOIR_DESKTOP_THEME_MIGRATE="$migrate_ok" 2>&1)"
   rc=$?
   problems=""
   [ "$rc" = 0 ] || problems+="exit $rc, want 0; "
+  [ "$(cat "$base/pgrep-idle.log" 2>/dev/null)" = "-u $(id -u) -x xfconfd" ] ||
+    problems+="pgrep got '$(tr '\n' '|' <"$base/pgrep-idle.log" 2>/dev/null)', want '-u $(id -u) -x xfconfd'; "
   if [ "$(tr '\n' ' ' <"$order" 2>/dev/null)" != "migrate session " ]; then
     problems+="order '$(tr '\n' ' ' <"$order" 2>/dev/null)', want migrate before session; "
   fi
@@ -4166,7 +4359,11 @@ test_host_bundle() {
       theme/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-terminal.xml \
       theme/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml \
       theme/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml
-    (cd rootfs/usr/share/themes/Teknoir && find . -type f -printf 'theme/themes/Teknoir/%P\n')
+    # The theme tree is what git publishes, not what the checkout holds: the
+    # tool copies git ls-files, so an ignored editor file must not count.
+    git ls-files --cached --others --exclude-standard -- \
+      rootfs/usr/share/themes/Teknoir |
+      sed 's#^rootfs/usr/share/themes/Teknoir/#theme/themes/Teknoir/#'
   } | sort >"$work/expected"
   if [ -d "$out" ]; then
     (cd "$out" && find . -type f -printf '%P\n' | sort) >"$work/actual"
@@ -4330,8 +4527,11 @@ EOF
     "$repo/rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/"
   cp rootfs/etc/xdg/xfce4/panel/default.xml "$repo/rootfs/etc/xdg/xfce4/panel/"
   cp "$df" "$repo/Dockerfile"
+  # The throwaway repo must not depend on anyone's global config: no signing,
+  # no hooks, an identity of its own.
   (cd "$repo" && git init -q && git add -A &&
-    git -c user.name=test -c user.email=test@example.invalid commit -qm init)
+    git -c commit.gpgsign=false -c core.hooksPath=/dev/null \
+      -c user.name=test -c user.email=test@example.invalid commit -qm init)
   problems=""
   summary="$(python3 -I "$repo/tools/host-bundle.py" --fonts-from "$fonts" \
     --out "$repo_out" 2>&1)"
@@ -4392,18 +4592,26 @@ EOF
   fi
 
   # 9. Ctrl-C in the middle of the replace: the test-only fault hook raises
-  # KeyboardInterrupt before the n-th rename. n=1 is before any move, n=2 is
-  # after one move-aside, and n=6 is the first move-in (five entries are moved
-  # aside first). Each run exits non-zero and leaves the old bundle and no
-  # temporary directory.
+  # KeyboardInterrupt before the n-th rename. Five entries are moved aside
+  # first, so n=1 is before any move, n=2 after one move-aside, n=6 the first
+  # move-in and n=10 the last one (the fifth entry moved in). A marker file in
+  # the old theme shows that the rollback puts the parked entries back whole:
+  # it must survive every case, with the old file list unchanged and no backup
+  # directory left behind.
   local out5="$work/out-interrupt"
   host_bundle_run "$fonts" "$df" --out "$out5" >/dev/null 2>&1
   problems=""
-  for n in 1 2 6; do
+  for n in 1 2 6 7 10; do
+    printf 'old marker\n' >"$out5/theme/old-marker"
+    (cd "$out5" && find . -type f -printf '%P\n' | sort) >"$work/interrupt-before"
     summary="$(env HOST_BUNDLE_TEST_FAIL_AT="$n" python3 -I tools/host-bundle.py \
       --fonts-from "$fonts" --dockerfile "$df" --allow-dirty --out "$out5" 2>&1)"
     rc=$?
     [ "$rc" -ne 0 ] || problems+="n=$n: exit 0 '$summary', want non-zero; "
+    [ -f "$out5/theme/old-marker" ] || problems+="n=$n: theme/old-marker is gone; "
+    (cd "$out5" && find . -type f -printf '%P\n' | sort) >"$work/interrupt-after"
+    cmp -s "$work/interrupt-before" "$work/interrupt-after" ||
+      problems+="n=$n: the file list changed: $(diff "$work/interrupt-before" "$work/interrupt-after" | head -5 | tr '\n' '|'); "
     if ! (cd "$out5" && sha256sum -c --quiet SHA256SUMS >/dev/null 2>&1); then
       problems+="n=$n: the old bundle's SHA256SUMS no longer check; "
     fi
@@ -4439,6 +4647,34 @@ EOF
     fail host-bundle-refused-out "$problems"
   fi
 
+  # 10b. A parent the tool cannot write into makes the temporary directory
+  # fail: a configuration error like the rest - exit 2, one message, no
+  # traceback (which would be exit 1, the font mismatch's), nothing written.
+  # Root ignores the mode, so the case is skipped there.
+  local roparent="$work/ro-parent"
+  if [ "$(id -u)" = 0 ]; then
+    skip host-bundle-unwritable-parent "running as root: a 0555 directory does not stop root"
+  else
+    mkdir -p "$roparent"
+    chmod 0555 "$roparent"
+    summary="$(host_bundle_run "$fonts" "$df" --out "$roparent/out" 2>&1)"
+    rc=$?
+    chmod 0755 "$roparent"
+    problems=""
+    [ "$rc" = 2 ] || problems+="exit $rc '$summary', want 2; "
+    [[ "$summary" == *"cannot create a temporary directory in $roparent"* ]] ||
+      problems+="the message does not name the parent: '$summary'; "
+    [[ "$summary" != *Traceback* ]] || problems+="a traceback was printed: '$summary'; "
+    [ -e "$roparent/out" ] && problems+="it wrote $roparent/out; "
+    [ -z "$(find "$roparent" -mindepth 1)" ] ||
+      problems+="it left entries in $roparent: $(find "$roparent" -mindepth 1 | tr '\n' ' '); "
+    if [ -z "$problems" ]; then
+      pass host-bundle-unwritable-parent
+    else
+      fail host-bundle-unwritable-parent "$problems"
+    fi
+  fi
+
   # 11. A file git ignores is not part of the tree the bundle copies: an
   # editor's *~ under the theme is skipped, and --out still builds.
   local zz="rootfs/usr/share/themes/Teknoir/gtk-3.0/zz-test.css~"
@@ -4470,7 +4706,8 @@ EOF
       printf 'desktop-theme-migrate\n' >>.gitignore &&
       git add .gitignore &&
       git rm -q --cached rootfs/usr/local/bin/desktop-theme-migrate &&
-      git -c user.name=test -c user.email=test@example.invalid commit -qm ignore
+      git -c commit.gpgsign=false -c core.hooksPath=/dev/null \
+        -c user.name=test -c user.email=test@example.invalid commit -qm ignore
   ) >"$work/ignored-repo.log" 2>&1; then
     problems+="could not prepare the ignored-source repository: $(tr '\n' '|' <"$work/ignored-repo.log"); "
   fi
