@@ -1557,6 +1557,11 @@ test_theme_migrate() {
     </property>
     <property name="workspace_count" type="int" value="2"/>
     <property name="focus_delay" type="int" value="250"/>
+    <property name="snap_width" type="string" value="10&#9;tab&#10;line"/>
+    <property name="keys" type="array">
+      <value type="string" value="x"/>
+      <value type="int" value="7"/>
+    </property>
   </property>
 </channel>
 EOF
@@ -1615,8 +1620,8 @@ desktop-theme-migrate: removed 5 settings from xfwm4.xml
 desktop-theme-migrate: removed 1 setting from xsettings.xml
 desktop-theme-migrate: removed 1 setting from xfce4-desktop.xml
 desktop-theme-migrate: removed 1 setting from xfce4-terminal.xml
-desktop-theme-migrate: removed the panel configuration
 desktop-theme-migrate: set Chromium's system title bar
+desktop-theme-migrate: removed the panel configuration
 EOF
   if ! cmp -s "$work/old.expected" "$work/old.err"; then
     problems+="stderr $(tr '\n' '|' <"$work/old.err"); "
@@ -1666,6 +1671,44 @@ expect("xfce4-desktop.xml",
         "/backdrop/workspace0/last-image"],
        ["/desktop-icons", "/desktop-icons/style"])
 expect("xfce4-terminal.xml", ["/color-background"], ["/misc-confirm-close"])
+
+
+def props(label):
+    """Every property of a channel file by path, with its element."""
+    found = {}
+
+    def walk(node, prefix):
+        for prop in node.findall("property"):
+            name = prefix + "/" + (prop.get("name") or "")
+            found[name] = prop
+            walk(prop, name)
+
+    walk(ET.parse(xml_dir + "/" + label).getroot(), "")
+    return found
+
+
+# The kept properties keep their values, not just their keys: a rewrite that
+# dropped an attribute would still pass the path check above.
+for label, name, want in [
+        ("xfwm4.xml", "/general/workspace_count", "2"),
+        ("xfwm4.xml", "/general/focus_delay", "250"),
+        ("xfwm4.xml", "/general/snap_width", "10\ttab\nline"),
+        ("xsettings.xml", "/Net/DoubleClickTime", "400"),
+        ("xfce4-desktop.xml", "/desktop-icons/style", "2"),
+        ("xfce4-terminal.xml", "/misc-confirm-close", "true")]:
+    prop = props(label).get(name)
+    if prop is None:
+        continue  # the kept-path check above already says it is gone
+    if prop.get("value") != want:
+        problems.append("%s: %s is %r, want %r"
+                        % (label, name, prop.get("value"), want))
+
+keys = props("xfwm4.xml").get("/general/keys")
+if keys is not None:
+    got = [value.get("value") for value in keys.findall("value")]
+    if got != ["x", "7"]:
+        problems.append("xfwm4.xml: /general/keys is %r, want ['x', '7']"
+                        % (got,))
 
 # The other copies are gone with the file: a user file nothing was left to
 # mention would still win over the image's.
@@ -1787,8 +1830,10 @@ EOF
     >"$work/bad.out" 2>"$work/bad.err"
   rc=$?
   if [ "$rc" = 1 ] &&
-    grep -qF "desktop-theme-migrate: warning: cannot update $xml/xfwm4.xml (the desktop starts anyway)" \
+    [ "$(wc -l <"$work/bad.err")" = 1 ] &&
+    grep -qF "desktop-theme-migrate: warning: cannot update $xml/xfwm4.xml: " \
       "$work/bad.err" &&
+    grep -qF "(the desktop starts anyway)" "$work/bad.err" &&
     [ ! -e "$home/.config/teknoir/theme-v1" ]; then
     pass theme-migrate-bad-xml
   else
@@ -1863,6 +1908,246 @@ PY
     pass theme-migrate-wiring
   else
     fail theme-migrate-wiring "$(tr '\n' '|' <"$work/wiring.out")"
+  fi
+
+  # 7. Every file is planned before any is written: one malformed Preferences
+  # fails the plan, so xfwm4 keeps its theme and the panel stays even though
+  # both were fine. Fixing the file lets the next start migrate everything.
+  home="$work/home-partial"
+  xml="$home/.config/xfce4/xfconf/xfce-perchannel-xml"
+  prefs="$home/.config/chromium-desktop/Default/Preferences"
+  mkdir -p "$xml" "$home/.config/chromium-desktop/Default"
+  cat >"$xml/xfwm4.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="Default"/>
+    <property name="focus_delay" type="int" value="250"/>
+  </property>
+</channel>
+EOF
+  printf '<channel name="xfce4-panel" version="1.0"/>\n' >"$xml/xfce4-panel.xml"
+  printf '{bad' >"$prefs"
+  cp "$xml/xfwm4.xml" "$work/partial.before"
+  cp "$xml/xfce4-panel.xml" "$work/partial-panel.before"
+  env -i PATH="$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+    >"$work/partial.out" 2>"$work/partial.err"
+  rc=$?
+  problems=""
+  if [ "$rc" != 1 ]; then
+    problems+="exit $rc, want 1; "
+  fi
+  if ! cmp -s "$work/partial.before" "$xml/xfwm4.xml"; then
+    problems+="xfwm4.xml was rewritten; "
+  fi
+  if ! cmp -s "$work/partial-panel.before" "$xml/xfce4-panel.xml"; then
+    problems+="the panel file changed; "
+  fi
+  if [ -e "$home/.config/teknoir/theme-v1" ]; then
+    problems+="a marker was written; "
+  fi
+  if [ -s "$work/partial.out" ]; then
+    problems+="stdout '$(tr '\n' '|' <"$work/partial.out")'; "
+  fi
+  if [ "$(wc -l <"$work/partial.err")" != 1 ] ||
+    ! grep -qF "desktop-theme-migrate: warning: cannot update $prefs: " \
+      "$work/partial.err" ||
+    ! grep -qF "(the desktop starts anyway)" "$work/partial.err"; then
+    problems+="stderr $(tr '\n' '|' <"$work/partial.err"); "
+  fi
+  # With the Preferences fixed, the next start does the whole migration.
+  printf '{}' >"$prefs"
+  env -i PATH="$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+    >"$work/partial2.out" 2>"$work/partial2.err"
+  rc=$?
+  if [ "$rc" != 0 ]; then
+    problems+="second exit $rc, want 0; "
+  fi
+  if [ ! -f "$home/.config/teknoir/theme-v1" ]; then
+    problems+="no marker after the second run; "
+  fi
+  if [ -e "$xml/xfce4-panel.xml" ] || [ -e "$home/.config/xfce4/panel" ]; then
+    problems+="the panel survived the second run; "
+  fi
+  if grep -q 'name="theme"' "$xml/xfwm4.xml" ||
+    ! grep -q 'name="focus_delay"' "$xml/xfwm4.xml"; then
+    problems+="xfwm4.xml after the second run: $(tr '\n' '|' <"$xml/xfwm4.xml"); "
+  fi
+  if [ -z "$problems" ]; then
+    pass theme-migrate-partial
+  else
+    fail theme-migrate-partial "$problems"
+  fi
+
+  # 8. A lone surrogate in Preferences cannot be decoded: one warning line, no
+  # traceback in the log, and nothing changed. An escaped surrogate in valid
+  # utf-8 is fine and migrates (that is what ensure_ascii keeps working).
+  home="$work/home-surrogate"
+  xml="$home/.config/xfce4/xfconf/xfce-perchannel-xml"
+  prefs="$home/.config/chromium-desktop/Default/Preferences"
+  mkdir -p "$xml" "$home/.config/chromium-desktop/Default"
+  printf '<channel name="xfwm4" version="1.0"><property name="general" type="empty"><property name="theme" type="string" value="Default"/></property></channel>\n' \
+    >"$xml/xfwm4.xml"
+  python3 -I -c '
+import sys
+# A raw lone surrogate (ED A0 80), which utf-8 does not allow.
+with open(sys.argv[1], "wb") as fh:
+    fh.write(b"{\"profile\":{\"name\":\"\xed\xa0\x80\"}}\n")
+' "$prefs"
+  cp "$xml/xfwm4.xml" "$work/surrogate.before"
+  cp "$prefs" "$work/surrogate-prefs.before"
+  env -i PATH="$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+    >"$work/surrogate.out" 2>"$work/surrogate.err"
+  rc=$?
+  problems=""
+  if [ "$rc" != 1 ]; then
+    problems+="exit $rc, want 1; "
+  fi
+  if ! cmp -s "$work/surrogate.before" "$xml/xfwm4.xml"; then
+    problems+="xfwm4.xml was rewritten; "
+  fi
+  if ! cmp -s "$work/surrogate-prefs.before" "$prefs"; then
+    problems+="Preferences was rewritten; "
+  fi
+  if [ -e "$home/.config/teknoir/theme-v1" ]; then
+    problems+="a marker was written; "
+  fi
+  if [ "$(wc -l <"$work/surrogate.err")" != 1 ] ||
+    ! grep -qF "desktop-theme-migrate: warning: cannot update $prefs: " \
+      "$work/surrogate.err" ||
+    ! grep -qF "(the desktop starts anyway)" "$work/surrogate.err"; then
+    problems+="stderr $(tr '\n' '|' <"$work/surrogate.err"); "
+  fi
+  if grep -q '^Traceback' "$work/surrogate.err" "$work/surrogate.out"; then
+    problems+="a traceback was logged; "
+  fi
+  if [ -z "$problems" ]; then
+    pass theme-migrate-surrogate
+  else
+    fail theme-migrate-surrogate "$problems"
+  fi
+
+  # 9. A channel file that is a symlink stays a symlink: the link's target is
+  # what xfconfd wrote and what has to lose the theme, so the write goes
+  # through realpath rather than replacing the link with a regular file.
+  home="$work/home-symlink"
+  xml="$home/.config/xfce4/xfconf/xfce-perchannel-xml"
+  mkdir -p "$xml"
+  cat >"$work/symlink-target.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="Default"/>
+    <property name="focus_delay" type="int" value="250"/>
+  </property>
+</channel>
+EOF
+  ln -s "$work/symlink-target.xml" "$xml/xfwm4.xml"
+  env -i PATH="$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+    >"$work/symlink.out" 2>"$work/symlink.err"
+  rc=$?
+  problems=""
+  if [ "$rc" != 0 ]; then
+    problems+="exit $rc, want 0; "
+  fi
+  if [ ! -L "$xml/xfwm4.xml" ]; then
+    problems+="the symlink became a regular file; "
+  fi
+  if grep -q 'name="theme"' "$work/symlink-target.xml"; then
+    problems+="the target kept /general/theme; "
+  fi
+  if ! grep -q 'name="focus_delay"' "$work/symlink-target.xml"; then
+    problems+="the target lost /general/focus_delay; "
+  fi
+  if [ -z "$problems" ]; then
+    pass theme-migrate-symlink
+  else
+    fail theme-migrate-symlink "$problems"
+  fi
+
+  # 10. Modes under umask 077: a rewritten file keeps the mode xfconfd gave it
+  # (0644), the marker's directory is 0700 and the marker itself 0600.
+  home="$work/home-mode"
+  xml="$home/.config/xfce4/xfconf/xfce-perchannel-xml"
+  mkdir -p "$xml"
+  printf '<channel name="xfwm4" version="1.0"><property name="general" type="empty"><property name="theme" type="string" value="Default"/></property></channel>\n' \
+    >"$xml/xfwm4.xml"
+  printf '<channel name="xfce4-terminal" version="1.0"><property name="color-background" type="string" value="#DFDBC8"/></channel>\n' \
+    >"$xml/xfce4-terminal.xml"
+  chmod 0644 "$xml/xfwm4.xml" "$xml/xfce4-terminal.xml"
+  (
+    umask 077
+    env -i PATH="$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+      >"$work/mode.out" 2>"$work/mode.err"
+  )
+  rc=$?
+  problems=""
+  if [ "$rc" != 0 ]; then
+    problems+="exit $rc, want 0; "
+  fi
+  for file in xfwm4.xml xfce4-terminal.xml; do
+    mode="$(stat -c %a "$xml/$file")"
+    if [ "$mode" != 644 ]; then
+      problems+="$file is $mode, want 644; "
+    fi
+  done
+  mode="$(stat -c %a "$home/.config/teknoir")"
+  if [ "$mode" != 700 ]; then
+    problems+="the marker directory is $mode, want 700; "
+  fi
+  mode="$(stat -c %a "$home/.config/teknoir/theme-v1")"
+  if [ "$mode" != 600 ]; then
+    problems+="the marker is $mode, want 600; "
+  fi
+  if [ -z "$problems" ]; then
+    pass theme-migrate-mode
+  else
+    fail theme-migrate-mode "$problems"
+  fi
+
+  # 11. A group left empty is kept, not dropped with its last property: an
+  # xfconf group that vanishes is a different thing to the applications that
+  # read it, and the file has to stay well-formed either way.
+  home="$work/home-empty-group"
+  xml="$home/.config/xfce4/xfconf/xfce-perchannel-xml"
+  mkdir -p "$xml"
+  cat >"$xml/xsettings.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xsettings" version="1.0">
+  <property name="Net" type="empty">
+    <property name="ThemeName" type="string" value="Xfce"/>
+  </property>
+</channel>
+EOF
+  env -i PATH="$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+    >"$work/empty-group.out" 2>"$work/empty-group.err"
+  rc=$?
+  problems=""
+  if [ "$rc" != 0 ]; then
+    problems+="exit $rc, want 0; "
+  fi
+  if ! python3 -I - "$xml/xsettings.xml" >"$work/empty-group-check.out" 2>&1 <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+groups = [p for p in root.findall("property") if p.get("name") == "Net"]
+if not groups:
+    sys.exit("the Net group is gone")
+children = list(groups[0])
+if children:
+    sys.exit("Net still has %r" % [child.get("name") for child in children])
+PY
+  then
+    problems+="$(tr '\n' '|' <"$work/empty-group-check.out"); "
+  fi
+  if [ -z "$problems" ]; then
+    pass theme-migrate-empty-parent
+  else
+    fail theme-migrate-empty-parent "$problems"
   fi
 
   rm -rf "$work"

@@ -411,10 +411,20 @@ before xfconfd reads the user's copies:
   Every other property - a window position, the workspace count, the
   double-click time - stays, and a file with none of the listed paths is not
   rewritten at all.
-- It deletes `xfce4-panel.xml` and `~/.config/xfce4/panel/`, so xfce4-panel
-  runs its own migrate again from the image's `default.xml`.
 - It sets Chromium's `browser.custom_chrome_frame` to false in an existing
   default profile, so Chromium gets the xfwm4 frame like a new profile does.
+- Last, it deletes `xfce4-panel.xml` and `~/.config/xfce4/panel/`, so
+  xfce4-panel runs its own migrate again from the image's `default.xml`.
+
+It works in two phases, because this is the user's data. First it plans every
+change without writing: it parses each channel file and Chromium's Preferences
+and computes their new bytes, so a malformed file anywhere in the home (or a
+Preferences that is not a JSON object) ends the run with the home exactly as it
+was. Then it writes the files it planned, and only after that removes the
+panel, which is the one step that destroys rather than rewrites, and writes the
+marker. A failure after the writes leaves the marker unwritten and the next
+start repeats the migration; by then the rewritten files hold none of the old
+settings, so the repeat only removes what is still old.
 
 What is lost, once, on that desktop: any manual window-manager or panel
 change, and any terminal colours the user picked. The panel goes back to the
