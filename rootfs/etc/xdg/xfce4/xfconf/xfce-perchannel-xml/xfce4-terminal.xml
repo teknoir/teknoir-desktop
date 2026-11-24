@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- The terminal, in the Teknoir tokens: #000000 background, #F2F1EE text,
+     #8CA7F2 cursor (accent-ink is legible on black, where the accent is not)
+     and an accent selection with #FFFFFF text.
+
+     The palette is 16 entries of base colours, not a copied theme:
+
+     - 0 line #2A2A2A, 1 crit #FA5A5A, 2 ok #2BC966, 3 warn #F5B02E,
+       4 fleet blue #6F90EA, 5 type magenta #C25BA6, 6 override cyan #2BB8C4,
+       7 text-2 #C7C5BF, 8 muted #8C8C8C, 15 text #F2F1EE.
+     - The accent #3B61BF is not in the palette: as text on black it reaches
+       only 3.6:1, so ANSI blue would be hard to read. The fleet layer colour
+       #6F90EA is the blue that stays legible.
+     - The brights 9..14 are their base colours (1..6) mixed 30% toward
+       #FFFFFF, rounded to the nearest byte; 8 and 15 are already the muted
+       and text greys.
+
+     Every entry except index 0 reaches at least 4.5:1 on the black
+     background. Index 0 is the line colour, a background by design.
+
+     The font is JetBrains Mono at 10, not the system font: the terminal is
+     the one place the monospace face is pinned, and its box-drawing glyphs
+     are what runs a TUI. No scrollbar (TERMINAL_SCROLLBAR_NONE) and no menu
+     bar: both are chrome the terminal can do without, and the scrollbar is a
+     focus target that has no meaning for a bot. The geometry 100x30 is wide
+     enough for logs without wrapping and short enough to leave the screen. -->
+<channel name="xfce4-terminal" version="1.0">
+  <property name="color-foreground" type="string" value="#F2F1EE"/>
+  <property name="color-background" type="string" value="#000000"/>
+  <property name="color-cursor" type="string" value="#8CA7F2"/>
+  <property name="color-cursor-use-default" type="bool" value="false"/>
+  <property name="color-selection" type="string" value="#FFFFFF"/>
+  <property name="color-selection-background" type="string" value="#3B61BF"/>
+  <property name="color-selection-use-default" type="bool" value="false"/>
+  <property name="color-bold-is-bright" type="bool" value="false"/>
+  <property name="color-palette" type="string" value="#2A2A2A;#FA5A5A;#2BC966;#F5B02E;#6F90EA;#C25BA6;#2BB8C4;#C7C5BF;#8C8C8C;#FC8C8C;#6BD994;#F8C86D;#9AB1F0;#D48CC1;#6BCDD6;#F2F1EE"/>
+  <property name="font-use-system" type="bool" value="false"/>
+  <property name="font-name" type="string" value="JetBrains Mono 10"/>
+  <property name="scrolling-bar" type="string" value="TERMINAL_SCROLLBAR_NONE"/>
+  <property name="misc-menubar-default" type="bool" value="false"/>
+  <property name="misc-default-geometry" type="string" value="100x30"/>
+</channel>

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=X-GNOME-Metatheme
+Name=Teknoir
+Comment=Dark theme of the Teknoir platform (Backstage nextgen)
+Encoding=UTF-8
+
+[X-GNOME-Metatheme]
+GtkTheme=Teknoir
+MetacityTheme=Teknoir
+IconTheme=Adwaita
+CursorTheme=Adwaita
+ButtonLayout=:minimize,maximize,close

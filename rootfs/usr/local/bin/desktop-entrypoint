@@ -364,6 +364,14 @@ if [ "$MODE" = virtual ]; then
   n="${DISPLAY_NUM#:}"
   rm -f "/tmp/.X${n}-lock" "/tmp/.X11-unix/X${n}" "$SOCKET"
 
+  # The theme migration drops the settings an older image wrote into the
+  # user's xfconf copies (README "Theme", a persistent home). It runs here,
+  # in the real run only and before Xvnc, because xfconfd reads those copies
+  # when the session starts and would otherwise export the old theme to it.
+  # A failure is only logged: an unmigrated desktop beats no desktop, and the
+  # script leaves its marker unwritten so the next start tries again.
+  "${SELF_DIR}/desktop-theme-migrate" || log "theme migration failed; the desktop starts anyway"
+
   log "starting Xvnc display ${DISPLAY_NUM} (${GEOMETRY}x${DEPTH}) on ${SOCKET}"
   start_child "${xvnc_cmd[@]}"
 

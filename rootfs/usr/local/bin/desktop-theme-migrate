@@ -1,0 +1,383 @@
+#!/usr/bin/env bash
+#
+# One-time theme migration for a desktop whose home outlives the image.
+#
+# A TeknoirBot's desktop keeps its home on a PVC (/home/desktop), and xfconfd,
+# xfsettingsd, xfwm4 and xfdesktop write a copy of the settings they are given
+# into ~/.config on first run. Those user copies win over the image's
+# /etc/xdg copies for ever after, so an existing bot keeps the values the old
+# image wrote: the old title bars, "Workspace 1"/"Workspace 2" where the image
+# names them "1"/"2", and Debian's own panel layout, while a new home gets the
+# full Teknoir theme. The same image would then look like two products
+# depending on the age of the volume.
+#
+# There is nothing to merge from the outside - the old values were written, not
+# defaulted - so this drops them once, before the session starts:
+#
+# - the theme, title, font, workspace-name and shadow properties of the xfwm4
+#   channel;
+# - the theme, icon, font, cursor, button-layout and Xft properties of the
+#   xsettings channel;
+# - the whole backdrop subtree of the xfce4-desktop channel (the image's
+#   monitorVNC-0 backdrop is keyed by the VNC connector name, which the user's
+#   file cannot have);
+# - the colour, palette, font and scrolling properties of the xfce4-terminal
+#   channel;
+# - the panel's user file and its plugin directory, so xfce4-panel runs its own
+#   migrate again from the image's /etc/xdg/xfce4/panel/default.xml;
+# - Chromium's client-side frame flag, which a profile seeded by an older image
+#   has as true.
+#
+# Everything else in those files stays, byte for byte when nothing matched: a
+# window position, a workspace count, a double-click time are the user's, not
+# the theme's. The panel and the window manager go back to the image's layout,
+# a manual window-manager or panel tweak on that desktop is lost once.
+#
+# It runs in two phases, because this is the user's data and a start that fails
+# must not eat more of it:
+#
+# 1. Plan. One Python program parses every existing channel file, and the
+#    Chromium Preferences, and computes the new bytes for each, writing
+#    nothing. Any error (an unreadable or malformed file, a non-object JSON
+#    root, an encoding error) ends the run here, with the home untouched.
+# 2. Apply. The same program writes the changed channel files and then
+#    Chromium's prefs, each atomically and durably. Only after it succeeded
+#    does this script remove the panel and write the marker. The panel goes
+#    last because it is the one step that destroys data rather than rewriting
+#    it, so every earlier step can be repeated safely.
+#
+# A failure in phase 2 leaves the marker unwritten and the next start repeats
+# the whole migration. That is acceptable: the files it already rewrote no
+# longer hold any of the listed properties, so the repeat only removes what is
+# still old, and the panel - the only loss - is removed last, after every
+# write has succeeded.
+#
+# When every step succeeded, $HOME/.config/teknoir/theme-v1 marks the home as
+# migrated and later starts skip the whole script. Delete that file and
+# restart the pod to run it again (the README says so in "Theme").
+#
+# The desktop never depends on this: the entrypoint calls it with `|| log`,
+# and on any failure (a malformed file, a read-only home) the script logs one
+# warning and leaves the marker unwritten, so the next start tries again. The
+# desktop starts either way, with whatever the user's copies say.
+set -euo pipefail
+
+PROG=desktop-theme-migrate
+
+log() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+# A failed step: say which, keep the marker away so the next start retries,
+# and exit 1. The entrypoint only logs this.
+fail() {
+  log "warning: $* (the desktop starts anyway)"
+  exit 1
+}
+
+# HOME is set by the image (ENV HOME=/home/desktop); the fallback is there so
+# the script is testable and can never write into an empty path.
+H="${HOME:-/home/desktop}"
+C="$H/.config"
+X="$C/xfce4/xfconf/xfce-perchannel-xml"
+M="$C/teknoir/theme-v1"
+
+# A migrated home costs one stat per start. Silent on purpose: a start of a
+# healthy persistent desktop logs nothing.
+if [ -e "$M" ]; then
+  exit 0
+fi
+
+# Phases 1 and 2 for the files Python owns: the four xfconf channel copies and
+# Chromium's Preferences. The program prints one unprefixed line per change on
+# success, or one reason on stdout and exits 1 on failure (that is why it does
+# not use sys.exit("..."), whose message goes to stderr unprefixed).
+#
+# The channel edits are xfconf's own paths ("/general/theme"): nested
+# <property name=...> elements under the root <channel>. An element is removed
+# only when its whole path is listed, so a group the list does not name stays
+# even when it ends up empty, and removing /backdrop takes its subtree with it
+# (the paths inside it are not listed one by one). A file with no match is left
+# untouched, not rewritten; the declaration stays, comments would be lost, and
+# xfconf's user files have none.
+#
+# Each write goes to a temp file next to the target and a rename, because
+# xfconfd rewrites these files too and a reader must never see half a file. It
+# is flushed and fsynced before the rename and its directory fsynced after, so
+# a power cut cannot leave the new bytes lost under the new name. A symlinked
+# file is written through realpath, so the link stays and its target moves. The
+# mode xfconfd gave the file (0644 under any umask) is kept.
+#
+# Tabs, newlines and CRs inside attribute values are turned into character
+# references before the parse, because expat normalises attribute whitespace to
+# spaces and xfconfd writes those bytes raw and means them; ElementTree writes
+# them back as &#09;/&#10;/&#13;, so the value round-trips. A value never holds
+# a raw '"', so every ="..." in the file is one attribute.
+changed=""
+if ! changed="$(python3 -I -c '
+import json
+import os
+import re
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+
+home = sys.argv[1]
+xml_dir = sys.argv[2]
+prefs_path = os.path.join(home, ".config", "chromium-desktop",
+                          "Default", "Preferences")
+
+CHANNELS = (
+    ("xfwm4.xml", (
+        "/general/theme",
+        "/general/title_font",
+        "/general/title_alignment",
+        "/general/button_layout",
+        "/general/workspace_names",
+        "/general/show_dock_shadow",
+        "/general/show_frame_shadow",
+        "/general/show_popup_shadow",
+    )),
+    ("xsettings.xml", (
+        "/Net/ThemeName",
+        "/Net/IconThemeName",
+        "/Gtk/FontName",
+        "/Gtk/MonospaceFontName",
+        "/Gtk/CursorThemeName",
+        "/Gtk/CursorThemeSize",
+        "/Gtk/DecorationLayout",
+        "/Xft/Antialias",
+        "/Xft/Hinting",
+        "/Xft/HintStyle",
+        "/Xft/RGBA",
+        "/Xft/Lcdfilter",
+        "/Xft/DPI",
+    )),
+    ("xfce4-desktop.xml", (
+        "/backdrop",
+    )),
+    ("xfce4-terminal.xml", (
+        "/color-foreground",
+        "/color-background",
+        "/color-cursor",
+        "/color-cursor-use-default",
+        "/color-selection",
+        "/color-selection-background",
+        "/color-selection-use-default",
+        "/color-bold-is-bright",
+        "/color-palette",
+        "/font-use-system",
+        "/font-name",
+        "/scrolling-bar",
+        "/misc-menubar-default",
+    )),
+)
+
+
+class Failed(Exception):
+    pass
+
+
+def keep_attribute_whitespace(text):
+    def refs(match):
+        value = match.group(0)
+        return (value.replace("\t", "&#9;")
+                     .replace("\n", "&#10;")
+                     .replace("\r", "&#13;"))
+
+    return re.sub("=\"[^\"]*\"", refs, text)
+
+
+def write_atomic(path, data, mode):
+    target = os.path.realpath(path)
+    directory = os.path.dirname(target) or "."
+    try:
+        fd, tmp = tempfile.mkstemp(dir=directory,
+                                   prefix=".desktop-theme-migrate.")
+    except OSError as exc:
+        raise Failed("cannot update %s: %s" % (path, exc))
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        # Not every filesystem can fsync a directory; the rename is still
+        # atomic, so this is the best effort that is possible.
+        pass
+    finally:
+        os.close(dir_fd)
+
+
+def plan_channel(path, wanted):
+    # The new bytes and the number of settings removed, or None when nothing
+    # matched: such a file is never rewritten.
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    root = ET.fromstring(keep_attribute_whitespace(raw.decode("utf-8")))
+    found = []
+
+    def walk(node, prefix):
+        for prop in node.findall("property"):
+            name = prefix + "/" + (prop.get("name") or "")
+            found.append((name, node, prop))
+            walk(prop, name)
+
+    walk(root, "")
+    removed = 0
+    for name, parent, prop in found:
+        if name in wanted:
+            parent.remove(prop)
+            removed += 1
+    if not removed:
+        return None
+    # A group the list does not name stays, and may now be empty; drop the
+    # indentation it held while its child existed, so it serialises as one tag.
+    for node in root.iter():
+        if len(node) == 0 and node.text is not None and not node.text.strip():
+            node.text = None
+    ET.indent(root, space="  ")
+    body = ET.tostring(root, encoding="unicode")
+    data = ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            + body + "\n").encode("utf-8")
+    return data, removed
+
+
+def plan_prefs(path):
+    with open(path, encoding="utf-8") as fh:
+        prefs = json.load(fh)
+    if not isinstance(prefs, dict):
+        raise Failed("not a JSON object")
+    browser = prefs.get("browser")
+    if not isinstance(browser, dict):
+        browser = {}
+        prefs["browser"] = browser
+    if browser.get("custom_chrome_frame") is False:
+        return None
+    browser["custom_chrome_frame"] = False
+    # ensure_ascii: a lone surrogate a broken profile holds would otherwise
+    # crash the dump on the utf-8 encode. It comes back as the same escape.
+    data = (json.dumps(prefs, indent=3, ensure_ascii=True)
+            + "\n").encode("utf-8")
+    return data
+
+
+def main():
+    writes = []
+    for name, wanted in CHANNELS:
+        path = os.path.join(xml_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            planned = plan_channel(path, set(wanted))
+            if planned is None:
+                continue
+            mode = os.stat(path).st_mode & 0o7777
+        except (OSError, ValueError, UnicodeError,
+                ET.ParseError) as exc:
+            raise Failed("cannot update %s: %s" % (path, exc))
+        removed = planned[1]
+        writes.append(
+            (path, planned[0], mode,
+             "removed %d setting%s from %s"
+             % (removed, "" if removed == 1 else "s", name)))
+    if os.path.isfile(prefs_path):
+        try:
+            planned = plan_prefs(prefs_path)
+            mode = os.stat(prefs_path).st_mode & 0o7777
+        except (Failed, OSError, ValueError, UnicodeError) as exc:
+            raise Failed("cannot update %s: %s" % (prefs_path, exc))
+        if planned is not None:
+            # \x27 is the apostrophe: this program is single-quoted by bash.
+            writes.append((prefs_path, planned, mode,
+                           "set Chromium\x27s system title bar"))
+    # Nothing is written before this point: every parse and every dump above
+    # has finished, so an error there leaves the home exactly as it was.
+    messages = []
+    for path, data, mode, message in writes:
+        try:
+            write_atomic(path, data, mode)
+        except (OSError, ValueError, UnicodeError) as exc:
+            # No marker, so the next start repeats this, and that is safe: the
+            # files already rewritten hold none of the old settings, so a
+            # repeat only removes what is still old, and the panel - the one
+            # destructive step - is removed after this program succeeded whole.
+            raise Failed("cannot update %s: %s" % (path, exc))
+        messages.append(message)
+    for message in messages:
+        print(message)
+
+
+try:
+    main()
+except (Failed, OSError, ValueError, UnicodeError) as exc:
+    sys.stdout.write("%s\n" % (exc,))
+    raise SystemExit(1)
+except Exception as exc:  # never a traceback: one warning line is the contract
+    sys.stdout.write("%s: %s\n" % (type(exc).__name__, exc))
+    raise SystemExit(1)
+' "$H" "$X")"; then
+  fail "${changed:-the theme settings could not be computed}"
+fi
+
+# Success lines are already written in order (channels, then Chromium) and
+# carry no prefix, so a failure can never print a half-finished list.
+while IFS= read -r line; do
+  if [ -n "$line" ]; then
+    log "$line"
+  fi
+done <<<"$changed"
+
+# The panel saves its layout and its plugins' own files under ~/.config/xfce4
+# and reloads them instead of running its migrate; with both gone it runs the
+# migrate again, from the image's default.xml. The directory holds only the
+# panel's own state (launchers, the clock's format), so nothing else is lost.
+# This is the destructive step and comes last, after every file above is
+# already in its new state, so a failure in this script can never make the
+# panel loss happen twice.
+panel_changed=0
+if [ -e "$X/xfce4-panel.xml" ]; then
+  rm -f -- "$X/xfce4-panel.xml" || fail "cannot remove $X/xfce4-panel.xml"
+  panel_changed=1
+fi
+if [ -e "$C/xfce4/panel" ]; then
+  rm -rf -- "$C/xfce4/panel" || fail "cannot remove $C/xfce4/panel"
+  panel_changed=1
+fi
+if ((panel_changed)); then
+  log "removed the panel configuration"
+fi
+
+# The marker: one line, in a directory of the theme's own (0700, nothing else
+# lives there, and at 0600). Written last, after the panel, so a run that
+# failed half way leaves no marker and the next start repeats the migration,
+# and durable: written to a temp file, flushed with sync(1) - which takes a
+# file and syncs its filesystem, not the whole system - renamed, and synced
+# again so the rename itself is on disk before the next start trusts it. A
+# half-written marker can never look like a finished one.
+# shellcheck disable=SC2174 # -m applies to the deepest directory, and that is
+# the one that has to be 0700: the ones -p creates above it (.config, or a new
+# home's .config) are ordinary directories.
+mkdir -m 0700 -p "$C/teknoir" || fail "cannot create $C/teknoir"
+marker_tmp="$(mktemp "$C/teknoir/.theme-v1.XXXXXX")" || fail "cannot create the theme marker"
+if ! printf '%s\n' "theme-v1: the Teknoir theme migration ran; delete this file to run it again" >"$marker_tmp" ||
+  ! sync -f "$marker_tmp"; then
+  rm -f -- "$marker_tmp"
+  fail "cannot write the theme marker"
+fi
+if ! mv -f -- "$marker_tmp" "$M" || ! sync -f "$M"; then
+  rm -f -- "$marker_tmp"
+  fail "cannot write $M"
+fi

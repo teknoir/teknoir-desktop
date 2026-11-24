@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- The xsettings channel: what xfsettingsd exports to every GTK program over
+     the XSettings protocol. A system-wide copy in this directory replaces the
+     one Debian's xfce4-settings ships (ThemeName Xfce, IconThemeName Tango,
+     antialiasing on by default), and it is honoured as long as the user's home
+     has no copy of its own; xfsettingsd writes one there on first run.
+
+     Keep it in step with /etc/gtk-3.0/settings.ini, which is the fallback for
+     programs that start before xfsettingsd has exported anything: the
+     gtk-settings test compares the two.
+
+     The values are the Teknoir theme's (see the comments in
+     /usr/share/themes/Teknoir/gtk-3.0/gtk.css). /Xft/RGBA is none, greyscale
+     antialiasing: subpixel rendering triples the colours of every glyph edge,
+     and this screen is VNC-compressed and often viewed scaled down, so
+     greyscale compresses better and looks the same on any viewer's panel.
+     /Gtk/DialogsUseHeader is false so a dialog keeps a title bar with a close
+     button and its own window frame (visible focus) instead of a headerbar
+     that draws its own. /Gtk/DecorationLayout is index.theme's ButtonLayout
+     and xfwm4's |HMC: a headerbar that draws its own title row (Thunar's, a
+     dialog's) carries the same three buttons in the same order as the window
+     frame, with no menu button. Animations are off: every animated frame is
+     one more rectangle to damage, compress and send.
+
+     Keys outside the theme keep Debian's stock values; a key one of them gets
+     wrong is not worth a divergence (a missing one falls back to the program's
+     own default anyway). /Net/DoubleClickTime is one of them: Debian's 400 ms
+     is still there because a 250 ms window is tight over VNC, where the
+     click's release arrives a jittery few milliseconds late. -->
+<channel name="xsettings" version="1.0">
+  <property name="Net" type="empty">
+    <property name="ThemeName" type="string" value="Teknoir"/>
+    <property name="IconThemeName" type="string" value="Adwaita"/>
+    <property name="SoundThemeName" type="string" value="default"/>
+    <property name="EnableEventSounds" type="bool" value="false"/>
+    <property name="EnableInputFeedbackSounds" type="bool" value="false"/>
+    <property name="DoubleClickTime" type="int" value="400"/>
+    <property name="DoubleClickDistance" type="int" value="5"/>
+    <property name="DndDragThreshold" type="int" value="8"/>
+    <property name="CursorBlink" type="bool" value="true"/>
+    <property name="CursorBlinkTime" type="int" value="1200"/>
+  </property>
+  <property name="Xft" type="empty">
+    <property name="DPI" type="int" value="96"/>
+    <property name="Antialias" type="int" value="1"/>
+    <property name="Hinting" type="int" value="1"/>
+    <property name="HintStyle" type="string" value="hintslight"/>
+    <property name="RGBA" type="string" value="none"/>
+    <property name="Lcdfilter" type="string" value="lcddefault"/>
+  </property>
+  <property name="Gtk" type="empty">
+    <property name="CanChangeAccels" type="bool" value="false"/>
+    <property name="ColorPalette" type="string" value="black:white:gray50:red:purple:blue:light blue:green:yellow:orange:lavender:brown:goldenrod4:dodger blue:pink:light green:gray10:gray30:gray75:gray90"/>
+    <property name="FontName" type="string" value="Hanken Grotesk 10"/>
+    <property name="MonospaceFontName" type="string" value="JetBrains Mono 10"/>
+    <property name="IconSizes" type="string" value=""/>
+    <property name="KeyThemeName" type="string" value=""/>
+    <property name="ButtonImages" type="bool" value="true"/>
+    <property name="MenuImages" type="bool" value="true"/>
+    <property name="MenuBarAccel" type="string" value="F10"/>
+    <property name="CursorThemeName" type="string" value="Adwaita"/>
+    <property name="CursorThemeSize" type="int" value="24"/>
+    <property name="DecorationLayout" type="string" value=":minimize,maximize,close"/>
+    <property name="DialogsUseHeader" type="bool" value="false"/>
+    <property name="EnableAnimations" type="bool" value="false"/>
+    <property name="TitlebarMiddleClick" type="string" value="lower"/>
+  </property>
+  <property name="Gdk" type="empty">
+    <property name="WindowScalingFactor" type="int" value="1"/>
+  </property>
+</channel>

@@ -33,6 +33,7 @@ a browser view to the device's own desktop instead of running a second one.
 | `/teknoir-notice.json` | the notice banner text (see [Notice banner](#notice-banner)); a symlink to `/run/desktop/notice.json`, `{"text": ""}` without a notice in virtual mode; 404 in host mode |
 | `/teknoir-notice.js` | the notice banner script, loaded by `vnc.html` (see [Notice banner](#notice-banner)) |
 | `desktop-healthcheck` | the readiness probe: completes an RFB 3.8 handshake on the VNC socket and checks `/vnc.html` |
+| `desktop-theme-migrate` | the one-time theme migration of a persistent home, run by the entrypoint before the session (see [Theme](#theme)) |
 
 ## Environment variables
 
@@ -67,7 +68,8 @@ and display are set when `Xvnc` starts.
 Virtual mode runs Chromium from the XFCE autostart
 (`/usr/local/bin/desktop-browser`), so closing the browser window is harmless:
 the desktop stays up and the user can open a new browser from the application
-menu.
+menu. Before the first start the wrapper also seeds a new profile's title-bar
+preference (see [Theme](#theme)); a start refused below writes nothing.
 
 Chromium runs with its **renderer sandbox**, which needs an unprivileged user
 namespace (`unshare`/`clone` with `CLONE_NEWUSER`). `RuntimeDefault` seccomp
@@ -114,9 +116,10 @@ protect by turning either direction off.
 
 A TeknoirBot's desktop (virtual mode) is shared with its whole teamspace, so
 whoever opens it must see that it is not their own computer.
-`DESKTOP_NOTICE` puts a thin amber banner at the top of the noVNC page, above
-the remote screen and noVNC's controls, and the banner is what device-controller
-passes for a TeknoirBot's computer:
+`DESKTOP_NOTICE` puts a 24 px dark banner with an amber left edge at the top of
+the noVNC page, above the remote screen and noVNC's controls (README "Theme"
+says why it is an edge and not a solid amber bar), and the banner is what
+device-controller passes for a TeknoirBot's computer:
 
 ```yaml
 env:
@@ -139,7 +142,14 @@ env:
   container and status line move down 24 px and the remote desktop is 24 px
   shorter while the banner shows, and it gets its full height back after `×`.
   A click anywhere on the banner (the `×` included) does not move keyboard
-  focus, which stays on the VNC canvas.
+  focus, which stays on the VNC canvas. The moved container is positioned and
+  comes later in the DOM than noVNC's centred dialogs, so the same room rule
+  lifts the connect dialog above it, with
+  `.noVNC_center:not(.noVNC_connect_layer){z-index:1}`: it stays visible
+  instead of being painted over by black. The `:not()` is what keeps the
+  credentials and verify-server dialogs readable: they share noVNC's
+  `.noVNC_connect_layer` z-index 60, which a plain `.noVNC_center` rule would
+  tie with, come later and win, dropping them under the connecting scrim.
 - noVNC's status line (Connecting, Disconnected, connection errors) moves down
   with the page and opens just below the banner, so the banner and the
   connection feedback are both readable. The banner's z-index is 99, below
@@ -170,6 +180,272 @@ env:
   `/run/desktop/notice.json` for websockify to serve. Only that one file is
   linked: the rest of `/run/desktop` (Xauthority, `vnc.sock`) stays unreachable
   from the page.
+
+## Theme
+
+The desktop wears the Teknoir look: the dark Backstage "nextgen" theme, so that
+a bot's computer and the Backstage page it is opened from read as one product.
+The colours are the dark tokens of
+`plugins/backstage-plugin-teknoir-fleet/src/theme/tokens.css` in
+[teknoir/backstage](https://github.com/teknoir/backstage):
+
+| Token | Value | Token | Value |
+|---|---|---|---|
+| bg | `#000000` | text | `#F2F1EE` |
+| surface | `#141414` | text-2 | `#C7C5BF` |
+| surface-2 | `#1C1C1C` | muted | `#8C8C8C` |
+| pop | `#171717` | accent | `#3B61BF` |
+| line | `#2A2A2A` | accent-ink | `#8CA7F2` |
+| line-2 | `#3D3D3D` | focus | `#9DB4F7` |
+| ok | `#2BC966` | warn | `#F5B02E` |
+| crit | `#FA5A5A` | on-accent | `#FFFFFF` |
+| dim-fill | `#0D0D0D` | wordmark | `#E0DED9` |
+
+The brand colours are `#E0AD1B`, `#ED6D36`, `#3B61BF` and `#9B357D`, and the
+layer colours `#C25BA6` (type), `#6F90EA` (fleet) and `#2BB8C4` (override). Two
+values are derived: accent hover `#426DD6` (accent at brightness 1.12), and the
+list selection `rgba(59,97,191,0.35)`, stronger than nextgen's 0.22 because a
+GTK row cannot carry its inset bar. The `theme-palette` test fails on any
+colour outside this set.
+
+**Dark only.** A desktop has one shared framebuffer: every viewer sees the same
+image and nothing in the image can follow one viewer's preference, so there is
+no light mode. Light could follow later by switching the token values; nothing
+in the theme's structure is dark-specific.
+
+**No compositing, no gradients, no animation.** Compositing stays off (a remote
+desktop pays for every pixel it moves), so X cannot mask a toplevel window's
+corners: menus and tooltips are square, widgets keep their 6px. Everything is a
+flat fill, `background-image: none` overrides Adwaita's gradients, and
+animations are off, because each extra frame is one more rectangle to damage,
+compress and send over the WebSocket.
+
+**GTK.** `rootfs/usr/share/themes/Teknoir/` is the theme `Teknoir`:
+
+- `index.theme` names it, with Adwaita's icons and cursor (Adwaita icons are
+  already installed as a dependency of GTK and take the theme's foreground
+  colour; they add nothing to the image).
+- `gtk-3.0/gtk.css` imports Adwaita's compiled dark theme
+  (`resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained-dark.css`, inside
+  `libgtk-3`) and then replaces every colour it paints. Plain `@define-color`
+  would do nothing: Adwaita's CSS hard-codes its hex values and never refers to
+  them, so each colour needs a selector. The `@define-color` list is still
+  there for whatever looks colours up by name, xfwm4 included.
+- A `:backdrop` block repeats the key rules. Without it, Adwaita paints a
+  window that does not have focus with its own greys (`#353535`, `#303030`):
+  an unfocused Thunar would go grey in its menubar, toolbar, sidebar and views,
+  and most windows on a watched desktop are unfocused.
+- There is no GTK2 or GTK4 theme, and no GTK2 or GTK4 library is installed:
+  Chromium, the only program in the image that is not XFCE, uses GTK3 in
+  trixie. The theme covers the one toolkit the image actually runs.
+
+**Settings.** One fallback and one channel:
+
+- `rootfs/etc/gtk-3.0/settings.ini` is what a GTK program reads itself when it
+  starts before xfsettingsd has exported the settings.
+- `rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml` replaces
+  Debian's: the theme, Adwaita's icons and cursor (24 px), fonts and Xft values
+  in one place, so the whole session gets them. Antialiasing is greyscale
+  (`/Xft/RGBA none`): subpixel rendering triples the colours of every glyph
+  edge, and this screen is compressed and often viewed scaled down.
+
+**Fonts.** Hanken Grotesk is the UI font and JetBrains Mono the monospace one,
+in the session and in every web page Chromium shows. Both are variable fonts,
+vendored from google/fonts rather than installed from Debian: Hanken Grotesk is
+not packaged in trixie at all, and `fonts-jetbrains-mono` is 7.5 MB against
+187 KB for the one file. They are installed in
+`/usr/local/share/fonts/teknoir/` together with their OFL-1.1 licence files,
+and `rootfs/etc/fonts/local.conf` prefers them for `sans-serif`, `system-ui`
+and `monospace`. DejaVu and Liberation stay behind them for the glyphs Hanken
+Grotesk lacks and for Chromium's layout metrics.
+
+The Dockerfile pins them the way it pins noVNC: `GOOGLE_FONTS_COMMIT` names the
+google/fonts commit, and four `*_SHA256` arguments name the bytes;
+`sha256sum -c` fails the build on either drift, and `fc-list` proves they
+reached the font cache. To bump them, take a newer commit, run `sha256sum` on
+the four files, and update the five arguments together.
+
+**Logo.** `rootfs/usr/share/teknoir/teknoir-mark.svg` is the Teknoir mark: the
+four brand paths in a 20×20 box, with no clip path, so any program can draw
+it. The panel uses it as its menu button. It needs `librsvg2-common` in the
+image (the gdk-pixbuf SVG loader, 400 KB; `librsvg2-2` alone cannot read SVG),
+and the build fails if that loader ever leaves the loader cache.
+
+**Window manager.** `rootfs/usr/share/themes/Teknoir/xfwm4/` is the xfwm4
+theme, generated by `tools/gen-xfwm4-theme.py` from the same tokens.
+`make theme` writes its 42 files and `make theme-check` fails when the
+committed ones drift. Generating instead of hand-painting the XPMs means the
+literal in every colour line is the value of the symbolic key it stands for,
+and the `xfwm4-theme` test proves the two never diverge.
+
+- The title bar is flat: a 1 px border row over a solid fill, `#141414` when
+  the window has focus and `#000000` when it does not. Focus is a change of
+  surface, not of hue, and no colour is spent on chrome; an inactive window
+  keeps its content colours, and only the title bar says who has focus.
+- There is no menu button (`button_layout=|HMC` is hide, maximize, close):
+  right-click the title bar or press Alt+Space for the window menu.
+- The frame is a 1 px line (`#3D3D3D` active, `#2A2A2A` inactive). The two
+  top corners are border colour for the title bar's full height, so the line
+  is unbroken beside the title instead of merging into the black. A 1 px line
+  is hard to grab by mouse, so resize with Alt+right-drag.
+- Buttons are 1 px glyphs at a neutral brightness; even close on hover stays
+  neutral, because colour is reserved for status. Shadows and compositing are
+  off.
+
+**Chromium's frame.** Without a compositor Chromium draws its own client-side
+frame, an opaque `#353535`/`#1B1B1B` band that is Adwaita grey, with no
+Teknoir title bar and no focus cue. `desktop-browser` therefore seeds a new
+profile's `Default/Preferences` with `"custom_chrome_frame": false`, so xfwm4
+frames Chromium like every other window. `/etc/chromium/master_preferences`
+cannot do it: Chromium never imports initial (master) preferences for a
+profile started with `--no-first-run`, which the wrapper always passes. The
+seed writes the file only when it does not exist yet, so an existing profile
+(a persistent home, or a user who changed the setting) is left alone. It costs
+the 30 px of height the title bar takes.
+
+**Panel.** `rootfs/etc/xdg/xfce4/panel/default.xml` replaces Debian's;
+xfce4-panel's `migrate` applies it silently to a home with no panel config of
+its own. One 40 px top bar: the applications menu (showing the Teknoir mark),
+a tasklist, an expanding separator, the workspace pager (two buttons, "1" and
+"2"), a separator and a clock. Forty and not forty-eight fits nextgen's 30 px
+controls and gives back 8 px on a screen that is often viewed scaled down.
+The panel has no colour of its own (`background-style 0`): `gtk.css` paints it
+black with the 1 px hairline. There is no actions plugin (its log-out would
+end the bot's session), no tray and no launchers.
+
+**Terminal.** The `xfce4-terminal` channel puts `#F2F1EE` on black, with an
+`#8CA7F2` cursor and an accent selection, JetBrains Mono 10, no scrollbar and
+no menu bar. The 16-entry palette is derived from the tokens: the line, crit,
+ok, warn, the
+fleet blue (not the accent, which is only 3.6:1 on black), type, override,
+text-2, muted and text, with the six brights mixed 30% toward white. Every
+entry but the line reaches 4.5:1 on black; `terminal-config` recomputes both
+rules.
+
+**Backdrop.** `xfce4-desktop.xml` is plain `#000000`, one backdrop for every
+workspace, under `monitorVNC-0`: xfdesktop keys the backdrop by the X connector
+name, and TigerVNC reports it as `VNC-0`. xfdesktop 4.20 runs in
+single-workspace mode and draws `workspace0` on every workspace, so the file
+sets that mode explicitly instead of carrying one entry per workspace (a
+`workspace1` entry is never read). The file this replaced used `monitor0`,
+which never matched, so the colour it named never applied. There is no desktop
+logo: a solid frame costs almost nothing to move, a clean desktop keeps bot
+screenshots clean, and nextgen keeps the brand in its chrome, as the panel's
+menu button does.
+
+`xfwm4.xml` sets the theme, the title font, two workspaces and their names, and
+turns shadows off. `theme-contrast` reads each foreground/background pair from
+the file that paints it - `themerc`'s title colours, the notice banner and its
+close button, the noVNC connect button, GTK's suggested button and menus, and
+the terminal's two colours - and requires every one to reach WCAG AA (4.5:1).
+Its only literals are the two selection fills, which are composited over black:
+`rgba(59,97,191,.35)` and `.22` under `#F2F1EE`.
+
+**The noVNC page.** `rootfs/opt/novnc-extra/teknoir.css` brings the same tokens
+to the browser. The desktop side stops at the remote screen, and the page
+around it would otherwise be noVNC's own blue and grey, so a bot's computer
+and its frame still read as one product.
+
+- It remaps noVNC 1.7.0's `--novnc-*` variables in `app/styles/constants.css`,
+  which `input.css` draws almost every control from (focus outline, checkbox,
+  radio, toggle and range accents, field fills), and then overrides the
+  hard-coded colours in `base.css`: the page and the remote screen's frame, the
+  control bar and its handle, the pop-out panels and their form controls, the
+  status line, the connect dialog, the transition scrim and the logo.
+- The Dockerfile links it into `vnc.html` right after `app/styles/input.css`,
+  the last of noVNC's three stylesheets, so it wins the cascade without a single
+  `!important`. It never sets `top`, `height` or `position` on
+  `#noVNC_container` or `#noVNC_status`: the notice banner's room rule owns
+  those, and a value in the stylesheet would compete with it.
+- Hanken Grotesk is served from `app/styles/` with an `@font-face` (variable,
+  `font-weight:100 900`, `font-display:swap`), so the page needs no font from a
+  CDN and no fontconfig: the browser loads the vendored file the desktop uses.
+  Its OFL-1.1 licence is copied next to it.
+- The noVNC logo is replaced by the Teknoir mark with CSS only
+  (`font-size:0` plus the SVG as a `background-image`), in the control bar at
+  24×24 and in the connect dialog at 64×64, so `vnc.html`'s markup stays
+  stock. The same mark becomes the favicon, the `theme-color` turns black, and
+  the tab reads "Teknoir desktop" (`PAGE_TITLE` in `app/ui.js`; ui.js
+  overwrites `document.title` at runtime, so the `<title>` alone would not
+  stick).
+- Every `sed` is followed by a `grep -qF` for exactly what it wrote, and the
+  build also checks the six ids the stylesheet styles, that `vnc.html` still has
+  two `.noVNC_logo` elements, and that `noVNC_status_warn` and `--novnc-blue`
+  are still there. Each anchor is byte-exact markup in a noVNC file, so the
+  greps are what turns a noVNC bump into a failed build instead of a
+  half-applied theme.
+- The page's cache key is `v` in `rootfs/opt/novnc-extra/index.html` (now 3).
+  A bump changes the URL a browser caches the page under, so it has to move
+  together with the notice script's `?v=`, the theme stylesheet's `?v=` and the
+  Dockerfile's sed lines; `test_novnc_extra` and `test_novnc_theme` check that
+  all of them carry the same number.
+
+**Notice banner.** The banner is no longer a solid amber bar: it is a dark
+surface bar with the warn colour as a 3px left edge and a hairline along the
+bottom, nextgen's toast warn pattern, so the message is calm and the status
+colour marks it. A solid `#F5B02E` bar was rejected because a permanent amber
+bar on every page load fatigues and stops being read, and nextgen keeps colour
+for status. The text is `#F2F1EE` on `#141414` (16.31:1), the `×` is
+`#C7C5BF` (10.67:1), and both are box-shadows rather than borders, so the
+24 px height the page makes room for stays exact. The script is
+`rootfs/opt/novnc-extra/teknoir-notice.js`; `theme-palette` holds its colours
+to the tokens, `notice-theme` checks the values it assigns, and `theme-contrast`
+reads its two pairs back out of the `cssText` strings.
+
+**A persistent home.** The theme is a system-wide setting in `/etc`, but
+xfconfd, xfsettingsd, xfwm4, xfce4-panel and xfdesktop write a copy of what
+they are given into `~/.config/` on first run, and those user copies win over
+the image's for ever after. A TeknoirBot's home sits on a PVC, so without help
+an existing bot would keep the title bars, workspace names and panel of the
+image that created it while a new bot gets the full theme.
+
+`rootfs/usr/local/bin/desktop-theme-migrate` runs once per home, from the
+entrypoint in virtual mode, before Xvnc and the session start and therefore
+before xfconfd reads the user's copies:
+
+- It removes the theme properties from the user's `xfwm4.xml`,
+  `xsettings.xml`, `xfce4-desktop.xml` and `xfce4-terminal.xml` (the theme,
+  title, font, workspace names, shadows, icons, cursor, Xft values, the
+  backdrop subtree and the terminal's colours, palette, font and scrolling
+  settings).
+  Every other property - a window position, the workspace count, the
+  double-click time - stays, and a file with none of the listed paths is not
+  rewritten at all.
+- It sets Chromium's `browser.custom_chrome_frame` to false in an existing
+  default profile, so Chromium gets the xfwm4 frame like a new profile does.
+- Last, it deletes `xfce4-panel.xml` and `~/.config/xfce4/panel/`, so
+  xfce4-panel runs its own migrate again from the image's `default.xml`.
+
+It works in two phases, because this is the user's data. First it plans every
+change without writing: it parses each channel file and Chromium's Preferences
+and computes their new bytes, so a malformed file anywhere in the home (or a
+Preferences that is not a JSON object) ends the run with the home exactly as it
+was. Then it writes the files it planned, and only after that removes the
+panel, which is the one step that destroys rather than rewrites, and writes the
+marker. A failure after the writes leaves the marker unwritten and the next
+start repeats the migration; by then the rewritten files hold none of the old
+settings, so the repeat only removes what is still old.
+
+What is lost, once, on that desktop: any manual window-manager or panel
+change, and any terminal colours the user picked. The panel goes back to the
+image's layout.
+
+When everything succeeded it writes `~/.config/teknoir/theme-v1`, and later
+starts do nothing. To run the migration again - after a theme change that the
+user copies would still mask - delete that file and restart the pod:
+
+```sh
+kubectl exec <pod> -- rm ~/.config/teknoir/theme-v1
+kubectl delete pod <pod>
+```
+
+It never stops the desktop: on any failure (a malformed file, a read-only
+home) it logs one warning, leaves the marker unwritten so the next start
+retries, and the entrypoint carries on and logs the failure too.
+
+Host mode gets only the noVNC page styling, `teknoir.css` and the notice
+banner: the desktop behind it is the host's own XFCE session, whose theme is
+the host's business.
 
 ## Security model
 
@@ -346,30 +622,41 @@ make image-council TNCTL_REF=<40-hex commit>
 ```sh
 make test          # bash test/run.sh: the whole suite
 make lint          # shellcheck + hadolint
+make theme         # regenerate the xfwm4 theme from tools/gen-xfwm4-theme.py
+make theme-check   # verify the committed xfwm4 theme matches the generator
 make image         # docker buildx build --target desktop --platform linux/amd64,linux/arm64
 make image-council # the council image, amd64: make image-council TNCTL_REF=<commit>
 ```
 
 The test suite needs no docker and no root. It runs `shellcheck -x` over every
 script, `hadolint` over the Dockerfile, validates the Chromium policy JSON and
-the xfconf XML, compares the entrypoint's `DESKTOP_DRY_RUN=1` output against the
+the xfconf XML, compares the entrypoint's
+`DESKTOP_DRY_RUN=1` output against the
 vectors in `test/vectors/` (the defaults of both modes, overrides, and the
 validation errors with their exit codes), checks the `DESKTOP_NOTICE` rules and
 the `notice.json` file it writes, runs `desktop-browser` with stub
-`chromium`/`unshare`/`pgrep` binaries to check the argv it gets and when its
-Singleton files are removed, checks the `index.html` redirect logic and
+`chromium`/`unshare`/`pgrep` binaries to check the argv it gets, when its
+Singleton files are removed and that it seeds only a new profile, checks the
+`index.html` redirect logic and
 `teknoir-notice.js` against a stand-in page with `node`, and runs
 `desktop-healthcheck` against a stand-in RFB server and a
 stand-in web server, including a server that refuses the connection the way a
-blacklisted Xvnc does. It checks the council image the same way, without
+blacklisted Xvnc does. The theme has its own checks: the theme XML, the GTK
+theme (with the optional GTK parse when GTK3 and python-gi are installed), the
+GTK settings, the fonts, the Dockerfile's theme packages, the palette and the
+contrast pairs; the generated xfwm4 theme and its generator, the panel, the
+terminal and the backdrop, and the migration of a persistent home (fixture
+homes, and that the entrypoint calls it before Xvnc in virtual mode only); and
+the noVNC stylesheet and the notice theme. It
+checks the council image the same way, without
 docker: that the old agent image is gone, the stage and its parent, the
 OpenCode pin, the entrypoint, user and environment, every rule of
 `opencode.json`, and that `make image-council` refuses anything but a full
 `teknoir/cli` commit.
 
 The image is multi-arch (`linux/amd64`, `linux/arm64`). It is built only from
-Debian packages plus the noarch noVNC tarball (checksum-pinned), so there is no
-per-architecture download.
+Debian packages plus noarch, checksum-pinned downloads (the noVNC tarball and
+the two fonts), so there is no per-architecture download.
 
 ## Licences
 
@@ -378,4 +665,7 @@ per-architecture download.
 | noVNC 1.7.0 | MPL-2.0 |
 | TigerVNC (Xvnc) | GPL-2.0 |
 | websockify | LGPL-3.0 |
+| Hanken Grotesk | OFL-1.1 (licence in `/usr/local/share/fonts/teknoir/HankenGrotesk-OFL.txt` and `/opt/novnc/app/styles/HankenGrotesk-OFL.txt`) |
+| JetBrains Mono | OFL-1.1 (licence in `/usr/local/share/fonts/teknoir/JetBrainsMono-OFL.txt`) |
+| Teknoir mark (`teknoir-mark.svg`) | Teknoir trademark |
 | this repository | Apache-2.0 (see `LICENSE`) |

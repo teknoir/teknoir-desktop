@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- The panel layout, applied by xfce4-panel's migrate on a home that has no
+     panel config of its own: migrate reads this file through the XDG config
+     dirs and writes the same settings into the user's channel silently, with
+     no welcome dialog. A user who already has a panel keeps it, so an
+     existing persistent home does not pick this up (see the persistent-home
+     note in README).
+
+     The bar is 40 px, not 48: it fits nextgen's 30 px controls with padding
+     and keeps 8 px of a screen that is often viewed scaled down. Its colour
+     and its 1 px hairline are not set here at all. background-style 0 (none)
+     lets the GTK theme paint them: gtk-3.0/gtk.css colours
+     .xfce4-panel.background #000000 and draws the inset line on its last
+     row, so the panel matches the rest of the chrome from one place.
+
+     No actions plugin: its log-out would end the bot's session. No systray:
+     nothing in the session owns a tray icon. No launchers: the applications
+     menu is the one door, and extra buttons are only more chrome to paint
+     and compress.
+
+     The pager is miniature-view false and one row, so it shows the two
+     named workspaces as small buttons rather than as a scaled-down screen;
+     the checked-button style then tells the current workspace. xfwm4.xml
+     names them "1" and "2", so the pager tracks the workspace count there. -->
+<channel name="xfce4-panel" version="1.0">
+  <property name="configver" type="int" value="2"/>
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <property name="dark-mode" type="bool" value="true"/>
+    <property name="panel-1" type="empty">
+      <property name="position" type="string" value="p=6;x=0;y=0"/>
+      <property name="length" type="uint" value="100"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="size" type="uint" value="40"/>
+      <property name="icon-size" type="uint" value="20"/>
+      <property name="nrows" type="uint" value="1"/>
+      <property name="mode" type="uint" value="0"/>
+      <property name="background-style" type="uint" value="0"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="1"/>
+        <value type="int" value="2"/>
+        <value type="int" value="3"/>
+        <value type="int" value="4"/>
+        <value type="int" value="5"/>
+        <value type="int" value="6"/>
+      </property>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <property name="plugin-1" type="string" value="applicationsmenu">
+      <property name="button-icon" type="string" value="/usr/share/teknoir/teknoir-mark.svg"/>
+      <property name="show-button-title" type="bool" value="false"/>
+      <property name="show-generic-names" type="bool" value="false"/>
+      <property name="button-title" type="string" value="Applications"/>
+    </property>
+    <property name="plugin-2" type="string" value="tasklist">
+      <property name="grouping" type="uint" value="0"/>
+      <property name="flat-buttons" type="bool" value="true"/>
+      <property name="show-handle" type="bool" value="false"/>
+      <property name="show-labels" type="bool" value="true"/>
+      <property name="include-all-workspaces" type="bool" value="false"/>
+      <property name="show-wireframes" type="bool" value="false"/>
+    </property>
+    <property name="plugin-3" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-4" type="string" value="pager">
+      <property name="miniature-view" type="bool" value="false"/>
+      <property name="rows" type="uint" value="1"/>
+    </property>
+    <property name="plugin-5" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-6" type="string" value="clock">
+      <property name="mode" type="uint" value="2"/>
+      <property name="digital-layout" type="uint" value="3"/>
+      <property name="digital-time-format" type="string" value="%H:%M"/>
+      <property name="tooltip-format" type="string" value="%A %d %B %Y"/>
+    </property>
+  </property>
+</channel>

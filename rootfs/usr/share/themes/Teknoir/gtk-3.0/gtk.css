@@ -1,0 +1,483 @@
+/*
+ * Teknoir: the GTK3 theme of a Teknoir desktop, matching the Backstage
+ * "nextgen" dark theme.
+ *
+ * It is a thin layer over Adwaita's compiled dark theme. The first statement
+ * imports gtk-contained-dark from libgtk-3.so.0 (a gresource, not a file on
+ * disk): trixie ships Adwaita inside the library, so there is no Adwaita
+ * directory under /usr/share/themes, and no theme named "Adwaita-dark" either
+ * (setting gtk-theme-name to it gives the light theme). The import supplies
+ * Adwaita's dark geometry, spacing and image assets; every rule below
+ * replaces a colour.
+ *
+ * Why @define-color alone does nothing. The list names the colours that
+ * programs and xfwm4 look up with lookup_color(), and the two are worth
+ * keeping accurate for that. But Adwaita never reads them: it is compiled
+ * CSS with the hex values written in (theme_bg_color #353535 appears 48
+ * times in gtk-contained-dark.css, and @theme_* is referenced nowhere), so a
+ * @define-color does not recolour a single widget. Each colour therefore has
+ * its own selector rule in this file.
+ *
+ * Why the :backdrop rules exist. A window that does not have focus is in the
+ * :backdrop state, and Adwaita paints it with its own hard-coded greys
+ * (#353535, #303030): an unfocused Thunar goes grey in its menubar, toolbar,
+ * sidebar and views. A remote desktop is watched far more than it is typed
+ * into, so most windows on screen are unfocused; grey would be the normal
+ * look. The :backdrop block at the end repeats the rules that matter, so an
+ * inactive window keeps exactly the content colours of the focused one. Only
+ * the xfwm4 title bar shows focus (active #141414, inactive #000000).
+ *
+ * Why toplevel popups are square. There is no compositor (it stays off for
+ * the bandwidth), so X cannot mask a toplevel window's corners: a
+ * border-radius on a menu or a tooltip would show the black of the X root
+ * through its corners. Menus and tooltips therefore have radius 0; widgets
+ * inside a window keep their 6px.
+ *
+ * No gradients, transitions or animations. Every frame is VNC-compressed and
+ * sent to the browser: a gradient is a large image in every frame, and a
+ * transition or animation only adds damaged rectangles and repaints for no
+ * information. Everything is a flat fill, and `background-image: none`
+ * overrides the gradients Adwaita draws on buttons, sliders and progress
+ * bars.
+ *
+ * The tokens (dark) come from
+ * plugins/backstage-plugin-teknoir-fleet/src/theme/tokens.css in
+ * github.com/teknoir/backstage, the same values the nextgen dark theme uses:
+ *
+ *   bg          #000000    surface       #141414
+ *   surface-2   #1C1C1C    pop           #171717
+ *   line        #2A2A2A    line-2        #3D3D3D
+ *   text        #F2F1EE    text-2        #C7C5BF
+ *   muted       #8C8C8C    accent        #3B61BF
+ *   accent-ink  #8CA7F2    focus         #9DB4F7
+ *   ok          #2BC966    warn          #F5B02E
+ *   crit        #FA5A5A    on-accent     #FFFFFF
+ *   dim-fill    #0D0D0D    wordmark      #E0DED9
+ *   brand       #E0AD1B #ED6D36 #3B61BF #9B357D
+ *   layer       #C25BA6 (type) #6F90EA (fleet) #2BB8C4 (override)
+ *
+ * Two values are derived rather than tokens. accent hover is #426DD6 (accent
+ * at brightness 1.12). The selection fill in a list is rgba(59,97,191,0.35),
+ * a stronger mix than nextgen's rgba(59,97,191,0.22), because a GTK row
+ * cannot carry nextgen's inset bar; the text on it over black is 13.9:1.
+ *
+ * The .xfce4-panel rules stay in this file: the panel is a GTK3 window, so
+ * its background and its 1px hairline come from here. The hairline is a
+ * box-shadow (a border on the panel window is not drawn), painted on the
+ * panel's last row: 40px of panel minus a 39px fill plus 1px of line is the
+ * nextgen bar. The window strut is 41px, not 40: xfce4-panel adds its own
+ * 1px bottom border row below the widget, and CSS cannot paint that row, so
+ * the panel reserves 41px of the screen. The panel's layout, its plugins and
+ * its size are in /etc/xdg/xfce4/panel/default.xml.
+ */
+@import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained-dark.css");
+
+@define-color theme_bg_color #000000;
+@define-color theme_fg_color #F2F1EE;
+@define-color theme_base_color #000000;
+@define-color theme_text_color #F2F1EE;
+@define-color theme_selected_bg_color #3B61BF;
+@define-color theme_selected_fg_color #FFFFFF;
+@define-color insensitive_fg_color #8C8C8C;
+@define-color borders #2A2A2A;
+@define-color unfocused_borders #2A2A2A;
+@define-color warning_color #F5B02E;
+@define-color error_color #FA5A5A;
+@define-color success_color #2BC966;
+@define-color wm_title #F2F1EE;
+@define-color wm_unfocused_title #8C8C8C;
+@define-color wm_bg #141414;
+@define-color wm_unfocused_bg #000000;
+
+* {
+  outline-color: #9DB4F7;
+  outline-style: solid;
+  outline-width: 2px;
+  outline-offset: -2px;
+  -gtk-outline-radius: 5px;
+  -gtk-icon-shadow: none;
+  text-shadow: none;
+}
+
+window, .background, dialog, messagedialog.background {
+  background-color: #000000;
+  color: #F2F1EE;
+}
+
+.dim-label, label.dim-label { color: #8C8C8C; opacity: 1; }
+*:disabled, label:disabled { color: #8C8C8C; }
+
+*:link, button.link, button.link:link { color: #8CA7F2; }
+*:link:hover, button.link:hover { color: #F2F1EE; }
+*:visited { color: #8CA7F2; }
+
+selection, *:selected, entry selection, textview text selection, label selection {
+  background-color: #3B61BF;
+  color: #FFFFFF;
+}
+
+separator, paned > separator {
+  background-color: #2A2A2A;
+  background-image: none;
+  min-width: 1px;
+  min-height: 1px;
+}
+
+headerbar, .titlebar:not(headerbar) {
+  background-color: #000000;
+  background-image: none;
+  border: none;
+  border-bottom: 1px solid #2A2A2A;
+  box-shadow: none;
+  color: #F2F1EE;
+  min-height: 40px;
+}
+headerbar:backdrop, .titlebar:backdrop { background-color: #000000; color: #8C8C8C; }
+headerbar .title { font-weight: 600; }
+headerbar .subtitle { color: #8C8C8C; }
+
+menubar, .menubar {
+  background-color: #000000;
+  background-image: none;
+  border-bottom: 1px solid #2A2A2A;
+  box-shadow: none;
+  padding: 0;
+}
+menubar > menuitem { min-height: 22px; padding: 4px 10px; color: #C7C5BF; }
+menubar > menuitem:hover { background-color: #1C1C1C; box-shadow: none; color: #F2F1EE; }
+
+menu, .menu, .context-menu {
+  background-color: #171717;
+  border: 1px solid #3D3D3D;
+  border-radius: 0;
+  padding: 4px 0;
+  margin: 0;
+  color: #F2F1EE;
+}
+menu menuitem, .menu menuitem, .context-menu menuitem {
+  min-height: 22px;
+  padding: 4px 12px;
+  color: #F2F1EE;
+  text-shadow: none;
+}
+menu menuitem:hover, .menu menuitem:hover, .context-menu menuitem:hover {
+  background-color: #1C1C1C;
+  color: #F2F1EE;
+}
+menu menuitem:disabled, .menu menuitem:disabled { color: #8C8C8C; }
+menu menuitem accelerator { color: #8C8C8C; }
+menu separator { background-color: #2A2A2A; margin: 4px 0; min-height: 1px; }
+menu menuitem check:checked, menu menuitem radio:checked { color: #8CA7F2; }
+menu > arrow { background-color: #171717; border-color: #3D3D3D; }
+
+popover, popover.background {
+  background-color: #171717;
+  border: 1px solid #3D3D3D;
+  border-radius: 6px;
+  box-shadow: none;
+  color: #F2F1EE;
+}
+popover modelbutton:hover { background-color: #1C1C1C; }
+
+tooltip, tooltip.background {
+  background-color: #171717;
+  border: 1px solid #3D3D3D;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 5px 8px;
+}
+tooltip * { color: #F2F1EE; background-color: transparent; }
+tooltip label { font-size: 9pt; }
+
+entry, spinbutton:not(.vertical), spinbutton.vertical > entry {
+  background-color: #141414;
+  background-image: none;
+  color: #F2F1EE;
+  caret-color: #F2F1EE;
+  border: 1px solid #2A2A2A;
+  border-radius: 6px;
+  box-shadow: none;
+  min-height: 28px;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+entry:focus, spinbutton:focus-within, spinbutton:not(.vertical):focus {
+  border-color: #8CA7F2;
+  box-shadow: none;
+  outline-width: 0;
+}
+entry:disabled { background-color: #0D0D0D; border-color: #2A2A2A; color: #8C8C8C; }
+entry.error { border-color: #FA5A5A; color: #F2F1EE; }
+entry.warning { border-color: #F5B02E; color: #F2F1EE; }
+entry image { color: #8C8C8C; }
+entry progress { border-bottom: 2px solid #3B61BF; background-image: none; background-color: transparent; }
+
+button {
+  background-color: transparent;
+  background-image: none;
+  border: 1px solid #3D3D3D;
+  border-radius: 6px;
+  box-shadow: none;
+  color: #F2F1EE;
+  min-height: 20px;
+  padding: 4px 10px;
+}
+button:hover { background-color: #141414; border-color: #C7C5BF; }
+button:active, button:checked { background-color: #1C1C1C; border-color: #C7C5BF; color: #F2F1EE; }
+button:checked:hover { background-color: #1C1C1C; }
+button:disabled { background-color: transparent; border-color: #2A2A2A; color: #8C8C8C; }
+button:backdrop { box-shadow: none; }
+button.suggested-action, button.default:focus {
+  background-color: #3B61BF;
+  border-color: #3B61BF;
+  color: #FFFFFF;
+  font-weight: 600;
+}
+button.suggested-action:hover { background-color: #426DD6; border-color: #426DD6; }
+button.destructive-action { background-color: transparent; border-color: #FA5A5A; color: #FA5A5A; }
+button.destructive-action:hover { background-color: #141414; }
+button.flat, toolbar button, .toolbar button, .path-bar button,
+headerbar button, .titlebar button, notebook > header button, stackswitcher button {
+  border-color: transparent;
+  background-color: transparent;
+  color: #C7C5BF;
+}
+button.flat:hover, toolbar button:hover, .toolbar button:hover, .path-bar button:hover,
+headerbar button:hover, .titlebar button:hover, notebook > header button:hover {
+  background-color: #1C1C1C;
+  border-color: transparent;
+  color: #F2F1EE;
+}
+.path-bar button:checked, stackswitcher button:checked {
+  background-color: rgba(59, 97, 191, 0.22);
+  border-color: transparent;
+  color: #F2F1EE;
+}
+.linked > button, .linked > entry { border-radius: 0; }
+.linked > button:first-child, .linked > entry:first-child { border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
+.linked > button:last-child, .linked > entry:last-child { border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
+
+check, radio {
+  background-color: #141414;
+  background-image: none;
+  border: 1px solid #3D3D3D;
+  box-shadow: none;
+  color: #FFFFFF;
+  min-width: 14px;
+  min-height: 14px;
+}
+check { border-radius: 4px; }
+check:checked, check:indeterminate, radio:checked, radio:indeterminate {
+  background-color: #3B61BF;
+  border-color: #3B61BF;
+  color: #FFFFFF;
+}
+check:hover, radio:hover { border-color: #C7C5BF; }
+
+switch {
+  background-color: #141414;
+  background-image: none;
+  border: 1px solid #3D3D3D;
+  box-shadow: none;
+  color: #C7C5BF;
+}
+switch:checked { background-color: #3B61BF; border-color: #3B61BF; color: #FFFFFF; }
+switch slider {
+  background-color: #C7C5BF;
+  background-image: none;
+  border: 1px solid #3D3D3D;
+  box-shadow: none;
+}
+switch:checked slider { background-color: #FFFFFF; border-color: #3B61BF; }
+
+scale trough, progressbar trough, levelbar trough {
+  background-color: #2A2A2A;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+}
+scale highlight, progressbar progress, levelbar block.filled {
+  background-color: #3B61BF;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+}
+scale slider {
+  background-color: #F2F1EE;
+  background-image: none;
+  border: 1px solid #3D3D3D;
+  box-shadow: none;
+}
+
+scrollbar, scrollbar.overlay-indicator:not(.dragging):not(.hovering) {
+  background-color: #000000;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+}
+scrollbar slider {
+  background-color: #3D3D3D;
+  border: none;
+  border-radius: 0;
+  min-width: 6px;
+  min-height: 6px;
+  margin: 0;
+}
+scrollbar slider:hover { background-color: #8C8C8C; }
+scrollbar slider:active { background-color: #C7C5BF; }
+scrollbar.overlay-indicator { background-color: transparent; }
+scrollbar.overlay-indicator slider { background-color: #3D3D3D; border: none; }
+
+.view, treeview.view, iconview, textview text, list, listview {
+  background-color: #000000;
+  color: #F2F1EE;
+}
+treeview.view:selected, treeview.view:selected:focus, .view:selected, .view:selected:focus,
+iconview:selected, iconview:selected:focus, row:selected, flowboxchild:selected {
+  background-color: rgba(59, 97, 191, 0.35);
+  color: #F2F1EE;
+}
+row:hover { background-color: #141414; }
+row:selected:hover { background-color: rgba(59, 97, 191, 0.35); }
+treeview.view header button {
+  background-color: #000000;
+  background-image: none;
+  border: none;
+  border-bottom: 1px solid #3D3D3D;
+  border-right: 1px solid #2A2A2A;
+  border-radius: 0;
+  box-shadow: none;
+  color: #8C8C8C;
+  font-weight: 500;
+  padding: 4px 8px;
+}
+treeview.view header button:hover { background-color: #141414; color: #F2F1EE; }
+treeview.view.expander { color: #8C8C8C; }
+treeview.view.expander:hover { color: #F2F1EE; }
+treeview.view:drop(active) { border-color: #8CA7F2; }
+treeview entry.flat, treeview entry { border-radius: 0; }
+.sidebar, placessidebar, placessidebar list, .sidebar.view, stacksidebar {
+  background-color: #000000;
+  border-color: #2A2A2A;
+}
+placessidebar row:selected, stacksidebar row:selected {
+  background-color: rgba(59, 97, 191, 0.22);
+  box-shadow: inset 2px 0 0 0 #8CA7F2;
+  color: #F2F1EE;
+}
+
+notebook { background-color: #000000; border-color: #2A2A2A; }
+notebook > header {
+  background-color: #000000;
+  background-image: none;
+  border-color: #2A2A2A;
+  box-shadow: inset 0 -1px 0 0 #2A2A2A;
+}
+notebook > header > tabs > tab {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  color: #C7C5BF;
+  font-weight: 500;
+  min-height: 28px;
+  padding: 0 12px;
+}
+notebook > header > tabs > tab:hover { background-color: #141414; color: #F2F1EE; box-shadow: none; }
+notebook > header > tabs > tab:checked { background-color: rgba(59, 97, 191, 0.22); color: #F2F1EE; }
+notebook > header.top > tabs > tab:checked { box-shadow: inset 0 -2px 0 0 #8CA7F2; }
+notebook > header.bottom > tabs > tab:checked { box-shadow: inset 0 2px 0 0 #8CA7F2; }
+notebook > header.left > tabs > tab:checked { box-shadow: inset -2px 0 0 0 #8CA7F2; }
+notebook > header.right > tabs > tab:checked { box-shadow: inset 2px 0 0 0 #8CA7F2; }
+notebook > stack:not(:only-child) { background-color: #000000; }
+
+toolbar, .toolbar, .primary-toolbar, .inline-toolbar, searchbar, actionbar {
+  background-color: #000000;
+  background-image: none;
+  border-color: #2A2A2A;
+  box-shadow: none;
+}
+statusbar { background-color: #000000; color: #8C8C8C; border-top: 1px solid #2A2A2A; }
+frame > border, .frame { border-color: #2A2A2A; border-radius: 0; }
+infobar { background-color: #141414; border-bottom: 1px solid #2A2A2A; }
+infobar.warning > revealer > box { background-color: #141414; box-shadow: inset 3px 0 0 0 #F5B02E; }
+infobar.error > revealer > box { background-color: #141414; box-shadow: inset 3px 0 0 0 #FA5A5A; }
+
+decoration, decoration:backdrop { box-shadow: 0 0 0 1px #3D3D3D; border-radius: 0; }
+
+.xfce4-panel.background {
+  background-color: #000000;
+  background-image: none;
+  box-shadow: inset 0 -1px 0 0 #2A2A2A;
+  color: #F2F1EE;
+}
+.xfce4-panel button {
+  background-color: transparent;
+  background-clip: padding-box;
+  border-color: transparent;
+  color: #C7C5BF;
+  padding: 0 8px;
+  min-height: 0;
+}
+.xfce4-panel button:hover { background-color: #1C1C1C; background-image: none; color: #F2F1EE; }
+.xfce4-panel button:checked {
+  background-color: rgba(59, 97, 191, 0.22);
+  background-image: none;
+  box-shadow: inset 0 -2px 0 0 #8CA7F2;
+  color: #F2F1EE;
+}
+
+window:backdrop, .background:backdrop, dialog:backdrop { background-color: #000000; color: #F2F1EE; }
+menubar:backdrop, toolbar:backdrop, .toolbar:backdrop, headerbar:backdrop, statusbar:backdrop,
+searchbar:backdrop, actionbar:backdrop, notebook > header:backdrop, notebook:backdrop {
+  background-color: #000000;
+  background-image: none;
+  border-color: #2A2A2A;
+}
+.view:backdrop, treeview.view:backdrop, iconview:backdrop, textview text:backdrop, list:backdrop,
+.sidebar:backdrop, placessidebar list:backdrop, scrollbar:backdrop {
+  background-color: #000000;
+  color: #F2F1EE;
+}
+entry:backdrop, spinbutton:backdrop { background-color: #141414; background-image: none; border-color: #2A2A2A; color: #F2F1EE; }
+button:backdrop { background-color: transparent; background-image: none; border-color: #3D3D3D; color: #F2F1EE; }
+button.flat:backdrop, toolbar button:backdrop, .toolbar button:backdrop, .path-bar button:backdrop,
+headerbar button:backdrop, .titlebar button:backdrop, notebook > header button:backdrop,
+.xfce4-panel button:backdrop {
+  background-color: transparent;
+  border-color: transparent;
+  color: #C7C5BF;
+}
+.xfce4-panel.background:backdrop {
+  background-color: #000000;
+  background-image: none;
+  box-shadow: inset 0 -1px 0 0 #2A2A2A;
+  color: #F2F1EE;
+}
+.xfce4-panel button:checked:backdrop { background-color: rgba(59, 97, 191, 0.22); background-image: none; color: #F2F1EE; }
+treeview.view:selected:backdrop, .view:selected:backdrop, iconview:selected:backdrop,
+row:selected:backdrop, flowboxchild:selected:backdrop {
+  background-color: rgba(59, 97, 191, 0.35);
+  color: #F2F1EE;
+}
+selection:backdrop, entry selection:backdrop, label selection:backdrop { background-color: #3B61BF; color: #FFFFFF; }
+treeview.view header button:backdrop { background-color: #000000; border-color: #2A2A2A; color: #8C8C8C; }
+notebook > header > tabs > tab:backdrop { color: #C7C5BF; }
+notebook > header > tabs > tab:checked:backdrop { background-color: rgba(59, 97, 191, 0.22); color: #F2F1EE; }
+check:backdrop, radio:backdrop, switch:backdrop { background-color: #141414; background-image: none; border-color: #3D3D3D; }
+check:checked:backdrop, radio:checked:backdrop, switch:checked:backdrop { background-color: #3B61BF; border-color: #3B61BF; color: #FFFFFF; }
+scrollbar slider:backdrop { background-color: #3D3D3D; }
+/* The states a widget is in while its window is unfocused. Adwaita paints
+   each of these itself (#141414/#1B1B1B/#353535 greys measured with
+   Gtk.StyleContext), and the generic rules above do not reach them: the
+   spinbutton, the sidebar rows, a checked path button or panel button, a
+   pressed button, the suggested and destructive actions, and the disabled
+   entry all win over `button:backdrop` or `entry:backdrop` on specificity.
+   These come last so they also win here, and every fill is a token again. */
+spinbutton:not(.vertical):backdrop, spinbutton.vertical:backdrop > entry { background-color: #141414; background-image: none; border-color: #2A2A2A; color: #F2F1EE; }
+placessidebar row:backdrop, placessidebar row:backdrop label, placessidebar row:backdrop image, stacksidebar row:backdrop { color: #F2F1EE; }
+.path-bar button:checked:backdrop, stackswitcher button:checked:backdrop { background-color: rgba(59, 97, 191, 0.22); color: #F2F1EE; }
+button:active:backdrop, button:checked:backdrop { background-color: #1C1C1C; background-image: none; border-color: #C7C5BF; color: #F2F1EE; }
+button.suggested-action:backdrop { background-color: #3B61BF; border-color: #3B61BF; color: #FFFFFF; }
+button.destructive-action:backdrop { background-color: transparent; border-color: #FA5A5A; color: #FA5A5A; }
+button:disabled:backdrop { border-color: #2A2A2A; color: #8C8C8C; }
+entry:disabled:backdrop { background-color: #0D0D0D; border-color: #2A2A2A; color: #8C8C8C; }

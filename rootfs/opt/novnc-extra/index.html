@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <title>Teknoir desktop</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Dark before anything loads: the page is served on the way to vnc.html, and
+     a browser paints its default white until the first style or the redirect
+     arrives. A dark scheme plus the html rule below removes that white flash
+     between opening the desktop and seeing it. -->
+<meta name="color-scheme" content="dark">
+<style>html{background:#000000;color:#F2F1EE;font-family:system-ui,sans-serif}</style>
 <!--
   Landing page for the Teknoir desktop. It sends the browser straight into the
   noVNC client with autoconnect on. Parameters the user came with are kept,
@@ -13,10 +19,11 @@
   ?view_only=1 or ?resize=scale still work. "v" is a cache key: websockify
   sends no Cache-Control, so a browser may keep an older vnc.html for a while,
   and bumping v changes the URL it is cached under. The Dockerfile loads the
-  banner script as teknoir-notice.js?v=<the same number>, so bump v here, in
-  the two static URLs below and in the Dockerfile's script tag together
-  (test_novnc_extra checks they match) whenever a build changes vnc.html or
-  teknoir-notice.js.
+  banner script as teknoir-notice.js?v=<the same number> and the theme as
+  teknoir.css?v=<the same number>, so bump v here, in the two static URLs
+  below, in the Dockerfile's script tag and in its teknoir.css link together
+  (test_novnc_extra and test_novnc_theme check they match) whenever a build
+  changes vnc.html, teknoir-notice.js or teknoir.css.
 -->
 <script>
 (function () {
@@ -27,7 +34,7 @@
     "resize": "remote",
     "path": "websockify",
     "show_dot": "1",
-    "v": "2"
+    "v": "3"
   };
   var params = new URLSearchParams(window.location.search || "");
   ["host", "port", "encrypt", "path"].forEach(function (k) {
@@ -42,10 +49,10 @@
   window.location.replace(target);
 })();
 </script>
-<meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=1&amp;reconnect=1&amp;reconnect_delay=2000&amp;resize=remote&amp;path=websockify&amp;show_dot=1&amp;v=2">
+<meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=1&amp;reconnect=1&amp;reconnect_delay=2000&amp;resize=remote&amp;path=websockify&amp;show_dot=1&amp;v=3">
 </head>
 <body>
 <p>Opening the Teknoir desktop&hellip;</p>
-<p><a href="vnc.html?autoconnect=1&amp;reconnect=1&amp;reconnect_delay=2000&amp;resize=remote&amp;path=websockify&amp;show_dot=1&amp;v=2">Continue</a></p>
+<p><a href="vnc.html?autoconnect=1&amp;reconnect=1&amp;reconnect_delay=2000&amp;resize=remote&amp;path=websockify&amp;show_dot=1&amp;v=3">Continue</a></p>
 </body>
 </html>
