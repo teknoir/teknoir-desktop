@@ -596,10 +596,16 @@ else:
             "install -d -m 0755 /usr/local/share/fonts/teknoir",
             "install -m 0644",
             "fc-cache -f /usr/local/share/fonts",
-            "fc-list | grep -qF 'HankenGrotesk-VF.ttf: Hanken Grotesk'",
-            "fc-list | grep -qF 'JetBrainsMono-VF.ttf: JetBrains Mono'"):
+            "fc-list > /tmp/fc-list.txt",
+            "grep -qF 'HankenGrotesk-VF.ttf: Hanken Grotesk' /tmp/fc-list.txt",
+            "grep -qF 'JetBrainsMono-VF.ttf: JetBrains Mono' /tmp/fc-list.txt",
+            "rm -f /tmp/fc-list.txt"):
         if needle not in body:
             problems.append("the font RUN lacks %r" % needle)
+    # grep -q closes the pipe at its first match; under pipefail the writer's
+    # SIGPIPE (141) then fails the build. That broke CI once.
+    if re.search(r"\|\s*grep -q", body):
+        problems.append("the font RUN pipes into grep -q (SIGPIPE under pipefail)")
     copy = at(r"^COPY rootfs/ /$")
     if copy < 0:
         problems.append("no COPY rootfs/ /")
