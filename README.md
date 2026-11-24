@@ -405,12 +405,14 @@ before xfconfd reads the user's copies:
 
 - It removes the theme properties from the user's `xfwm4.xml`,
   `xsettings.xml`, `xfce4-desktop.xml` and `xfce4-terminal.xml` (the theme,
-  title, font, workspace names, shadows, icons, cursor, Xft values, the
-  backdrop subtree and the terminal's colours, palette, font and scrolling
+  title, font, workspace names and count, shadows, icons, cursor, Xft values,
+  the backdrop subtree and the terminal's colours, palette, font and scrolling
   settings).
-  Every other property - a window position, the workspace count, the
-  double-click time - stays, and a file with none of the listed paths is not
-  rewritten at all.
+  The workspace count goes with the names: the theme names two workspaces "1"
+  and "2", and Ubuntu's stock user copy has a count of 4, so keeping it would
+  leave the pager showing "1 2 Workspace 3 Workspace 4".
+  Every other property - a window position, the double-click time - stays,
+  and a file with none of the listed paths is not rewritten at all.
 - It sets Chromium's `browser.custom_chrome_frame` to false in an existing
   default profile, so Chromium gets the xfwm4 frame like a new profile does.
 - Last, it deletes `xfce4-panel.xml` and `~/.config/xfce4/panel/`, so
@@ -439,13 +441,43 @@ kubectl exec <pod> -- rm ~/.config/teknoir/theme-v1
 kubectl delete pod <pod>
 ```
 
+In host mode the same file lives in the device user's home; delete it and
+restart the unit:
+
+```sh
+sudo rm /home/<device user>/.config/teknoir/theme-v1
+sudo systemctl restart teknoir-desktop
+```
+
 It never stops the desktop: on any failure (a malformed file, a read-only
 home) it logs one warning, leaves the marker unwritten so the next start
 retries, and the entrypoint carries on and logs the failure too.
 
-Host mode gets only the noVNC page styling, `teknoir.css` and the notice
-banner: the desktop behind it is the host's own XFCE session, whose theme is
-the host's business.
+**Host mode.** The ansible desktop playbook (`desktop_theme: teknoir`, its
+default) installs the bundle from `make host-bundle` on the device, and the
+session script's `TEKNOIR_DESKTOP_THEME=teknoir` themes the remote session
+only. For XFCE it puts `/usr/local/share/teknoir-desktop/xdg` first in
+`XDG_CONFIG_DIRS` for that session and runs the one-time migration
+(`~/.config/teknoir/theme-v1` in the device user's home). XFCE gets the full
+theme; another session gets only `GTK_THEME=Teknoir`. Nothing in `/etc/xdg`
+or the system fontconfig changes, but the device user's own XFCE settings
+under `~/.config/xfce4` are shared with any local XFCE session of the same
+user, so the migration resets the listed theme keys (and the panel layout) for
+that user once; that reset view of the panel also means a local XFCE session
+of the user gets the Teknoir panel - no systray, no log-out button, no
+launchers - once the migration has run. The fonts are installed system-wide
+but are not the default for anything.
+
+Devices run XFCE 4.14 (Ubuntu 20.04) and 4.16 (22.04) where the image runs
+4.20, so the bundle carries two compatibility files of its own:
+`xfce4/terminal/terminalrc`, generated from the xfce4-terminal channel because
+xfce4-terminal 0.8 reads that file, not the channel (a user's own
+`~/.config/xfce4/terminal/terminalrc` still wins - the migration does not
+touch it); and a copy of the panel's `default.xml` with the clock's pre-4.18
+`digital-format` key added next to the image's `digital-time-format`. The
+migration is skipped while a local XFCE session of the user is running
+(`xfconfd` in the process list): that session would write its in-memory values
+back over the migrated files, so the migration waits for a start without one.
 
 ## Security model
 
@@ -525,7 +557,14 @@ nothing.
   systemd starts the unit again. Missing packages make it exit 78 (EX_CONFIG)
   instead, so the unit stays failed rather than restarting every 5 s; it also
   needs the `xauth` package for the display's cookie and `dbus-x11` for the
-  `dbus-launch` the session runs under.
+  `dbus-launch` the session runs under. `TEKNOIR_DESKTOP_THEME` (default
+  `none`, set by the playbook's drop-in) themes the remote session as
+  [Theme](#theme) describes.
+
+Both files, and the theme files they need, come from `make host-bundle`: it
+writes this bundle for the ansible repository's
+`playbooks/files/teknoir-desktop`, with a `SOURCE` naming the commit and a
+`SHA256SUMS` the role can check.
 
 The socket group must match the pod's `supplementalGroups`. Every Teknoir
 device has the system group `teknoir-desktop` with the fixed gid **64080** (the
@@ -624,6 +663,7 @@ make test          # bash test/run.sh: the whole suite
 make lint          # shellcheck + hadolint
 make theme         # regenerate the xfwm4 theme from tools/gen-xfwm4-theme.py
 make theme-check   # verify the committed xfwm4 theme matches the generator
+make host-bundle   # host-mode bundle for ansible: make host-bundle OUT=<ansible>/playbooks/files/teknoir-desktop
 make image         # docker buildx build --target desktop --platform linux/amd64,linux/arm64
 make image-council # the council image, amd64: make image-council TNCTL_REF=<commit>
 ```
@@ -647,7 +687,12 @@ GTK settings, the fonts, the Dockerfile's theme packages, the palette and the
 contrast pairs; the generated xfwm4 theme and its generator, the panel, the
 terminal and the backdrop, and the migration of a persistent home (fixture
 homes, and that the entrypoint calls it before Xvnc in virtual mode only); and
-the noVNC stylesheet and the notice theme. It
+the noVNC stylesheet and the notice theme. The host side has its own: the
+session script runs with stub tools to check the `TEKNOIR_DESKTOP_THEME`
+switch (the session's environment, the migration's order, and every refusal),
+and `make host-bundle`'s tool builds offline from fake fonts (layout, modes,
+checksums, determinism, and that it refuses a wrong pin or a foreign
+directory). It
 checks the council image the same way, without
 docker: that the old agent image is gone, the stage and its parent, the
 OpenCode pin, the entrypoint, user and environment, every rule of
