@@ -8,11 +8,13 @@
      tools/gen-xfwm4-theme.py (make theme). The title bar is flat: the focused
      window's title is #141414 against a #000000 unfocused one, so focus reads
      as a change of surface and no colour is spent on chrome. title_alignment
-     and button_layout repeat the theme's own values because xfconf loads
-     after GTK and a user copy of this channel could otherwise disagree with
-     themerc; the xfwm4-theme test compares the two. There is no menu button
-     (|HMC is hide, maximize, close): right-click the title bar or press
-     Alt+Space for the window menu.
+     and button_layout repeat the theme's own values, but they do not decide
+     the layout: themerc wins over this channel (measured live: a copy here
+     that disagreed with the theme changed nothing). They are here so that
+     xfwm4-settings shows what is in effect instead of an old default, and
+     the xfwm4-theme test compares the two. There is no menu button (|HMC is
+     hide, maximize, close): right-click the title bar or press Alt+Space for
+     the window menu.
 
      Shadows are off. Without a compositor xfwm4 can only fake a drop shadow
      by painting more border, and a 1 px flat frame wants none. The workspace

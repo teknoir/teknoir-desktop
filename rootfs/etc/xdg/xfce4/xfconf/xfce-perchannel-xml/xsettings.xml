@@ -22,7 +22,9 @@
 
      Keys outside the theme keep Debian's stock values; a key one of them gets
      wrong is not worth a divergence (a missing one falls back to the program's
-     own default anyway). -->
+     own default anyway). /Net/DoubleClickTime is one of them: Debian's 400 ms
+     is still there because a 250 ms window is tight over VNC, where the
+     click's release arrives a jittery few milliseconds late. -->
 <channel name="xsettings" version="1.0">
   <property name="Net" type="empty">
     <property name="ThemeName" type="string" value="Teknoir"/>
@@ -30,7 +32,7 @@
     <property name="SoundThemeName" type="string" value="default"/>
     <property name="EnableEventSounds" type="bool" value="false"/>
     <property name="EnableInputFeedbackSounds" type="bool" value="false"/>
-    <property name="DoubleClickTime" type="int" value="250"/>
+    <property name="DoubleClickTime" type="int" value="400"/>
     <property name="DoubleClickDistance" type="int" value="5"/>
     <property name="DndDragThreshold" type="int" value="8"/>
     <property name="CursorBlink" type="bool" value="true"/>
@@ -45,12 +47,13 @@
     <property name="Lcdfilter" type="string" value="lcddefault"/>
   </property>
   <property name="Gtk" type="empty">
+    <property name="CanChangeAccels" type="bool" value="false"/>
+    <property name="ColorPalette" type="string" value="black:white:gray50:red:purple:blue:light blue:green:yellow:orange:lavender:brown:goldenrod4:dodger blue:pink:light green:gray10:gray30:gray75:gray90"/>
     <property name="FontName" type="string" value="Hanken Grotesk 10"/>
     <property name="MonospaceFontName" type="string" value="JetBrains Mono 10"/>
     <property name="IconSizes" type="string" value=""/>
     <property name="KeyThemeName" type="string" value=""/>
-    <property name="ToolbarStyle" type="string" value="icons"/>
-    <property name="ToolbarIconSize" type="string" value="small-toolbar"/>
+    <property name="ButtonImages" type="bool" value="true"/>
     <property name="MenuImages" type="bool" value="true"/>
     <property name="MenuBarAccel" type="string" value="F10"/>
     <property name="CursorThemeName" type="string" value="Adwaita"/>
@@ -58,14 +61,9 @@
     <property name="DecorationLayout" type="string" value="menu:minimize,maximize,close"/>
     <property name="DialogsUseHeader" type="bool" value="false"/>
     <property name="EnableAnimations" type="bool" value="false"/>
-    <property name="ErrorBell" type="bool" value="true"/>
-    <property name="RecentFilesMaxAge" type="int" value="7"/>
+    <property name="TitlebarMiddleClick" type="string" value="lower"/>
   </property>
   <property name="Gdk" type="empty">
     <property name="WindowScalingFactor" type="int" value="1"/>
-  </property>
-  <property name="Xfce" type="empty">
-    <property name="LastCustomMenusChanged" type="int" value="0"/>
-    <property name="LastMenuIconsSizeChanged" type="int" value="0"/>
   </property>
 </channel>

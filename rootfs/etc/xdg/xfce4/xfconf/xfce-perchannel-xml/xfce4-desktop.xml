@@ -16,34 +16,22 @@
      default; the desktop-backdrop test pins the name, and a TigerVNC bump
      needs a live check.
 
-     There is one entry per workspace (xfwm4.xml sets workspace_count to 2).
-     image-style 0 is no image, color-style 0 is the plain colour, and rgba1
-     and rgba2 are both opaque black. The desktop-icons block stays: it turns
-     every icon class off, so the desktop is a workspace to watch, not a place
-     to find files. -->
+     There is one backdrop for every workspace. xfdesktop 4.20 runs in
+     single-workspace mode and reads workspace0 for all of them unless told
+     otherwise, so a workspace1 entry is dead config: it is never drawn. The
+     single-workspace-mode and single-workspace-number keys make that
+     explicit, and they are what keeps the black on every workspace if
+     xfdesktop ever changes its default. image-style 0 is no image,
+     color-style 0 is the plain colour, and rgba1 and rgba2 are both opaque
+     black. The desktop-icons block stays: it turns every icon class off, so
+     the desktop is a workspace to watch, not a place to find files. -->
 <channel name="xfce4-desktop" version="1.0">
   <property name="backdrop" type="empty">
+    <property name="single-workspace-mode" type="bool" value="true"/>
+    <property name="single-workspace-number" type="int" value="0"/>
     <property name="screen0" type="empty">
       <property name="monitorVNC-0" type="empty">
         <property name="workspace0" type="empty">
-          <property name="color-style" type="int" value="0"/>
-          <property name="image-style" type="int" value="0"/>
-          <property name="last-image" type="string" value=""/>
-          <property name="image-path" type="string" value=""/>
-          <property name="rgba1" type="array">
-            <value type="double" value="0"/>
-            <value type="double" value="0"/>
-            <value type="double" value="0"/>
-            <value type="double" value="1"/>
-          </property>
-          <property name="rgba2" type="array">
-            <value type="double" value="0"/>
-            <value type="double" value="0"/>
-            <value type="double" value="0"/>
-            <value type="double" value="1"/>
-          </property>
-        </property>
-        <property name="workspace1" type="empty">
           <property name="color-style" type="int" value="0"/>
           <property name="image-style" type="int" value="0"/>
           <property name="last-image" type="string" value=""/>

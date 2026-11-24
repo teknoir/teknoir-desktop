@@ -63,9 +63,12 @@
  *
  * The .xfce4-panel rules stay in this file: the panel is a GTK3 window, so
  * its background and its 1px hairline come from here. The hairline is a
- * box-shadow (a border on the panel window is not drawn), and 40px of panel
- * minus a 39px fill plus 1px of line is the nextgen bar. The panel's layout,
- * its plugins and its size are in /etc/xdg/xfce4/panel/default.xml.
+ * box-shadow (a border on the panel window is not drawn), painted on the
+ * panel's last row: 40px of panel minus a 39px fill plus 1px of line is the
+ * nextgen bar. The window strut is 41px, not 40: xfce4-panel adds its own
+ * 1px bottom border row below the widget, and CSS cannot paint that row, so
+ * the panel reserves 41px of the screen. The panel's layout, its plugins and
+ * its size are in /etc/xdg/xfce4/panel/default.xml.
  */
 @import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained-dark.css");
 
@@ -203,7 +206,7 @@ entry:focus, spinbutton:focus-within, spinbutton:not(.vertical):focus {
   box-shadow: none;
   outline-width: 0;
 }
-entry:disabled { background-color: #0D0D0D; color: #8C8C8C; }
+entry:disabled { background-color: #0D0D0D; border-color: #2A2A2A; color: #8C8C8C; }
 entry.error { border-color: #FA5A5A; color: #F2F1EE; }
 entry.warning { border-color: #F5B02E; color: #F2F1EE; }
 entry image { color: #8C8C8C; }
@@ -220,7 +223,7 @@ button {
   padding: 4px 10px;
 }
 button:hover { background-color: #141414; border-color: #C7C5BF; }
-button:active, button:checked { background-color: #1C1C1C; border-color: #C7C5BF; }
+button:active, button:checked { background-color: #1C1C1C; border-color: #C7C5BF; color: #F2F1EE; }
 button:checked:hover { background-color: #1C1C1C; }
 button:disabled { background-color: transparent; border-color: #2A2A2A; color: #8C8C8C; }
 button:backdrop { box-shadow: none; }
@@ -409,14 +412,16 @@ decoration, decoration:backdrop { box-shadow: 0 0 0 1px #3D3D3D; border-radius: 
 }
 .xfce4-panel button {
   background-color: transparent;
+  background-clip: padding-box;
   border-color: transparent;
   color: #C7C5BF;
   padding: 0 8px;
   min-height: 0;
 }
-.xfce4-panel button:hover { background-color: #1C1C1C; color: #F2F1EE; }
+.xfce4-panel button:hover { background-color: #1C1C1C; background-image: none; color: #F2F1EE; }
 .xfce4-panel button:checked {
   background-color: rgba(59, 97, 191, 0.22);
+  background-image: none;
   box-shadow: inset 0 -2px 0 0 #8CA7F2;
   color: #F2F1EE;
 }
@@ -448,7 +453,7 @@ headerbar button:backdrop, .titlebar button:backdrop, notebook > header button:b
   box-shadow: inset 0 -1px 0 0 #2A2A2A;
   color: #F2F1EE;
 }
-.xfce4-panel button:checked:backdrop { background-color: rgba(59, 97, 191, 0.22); color: #F2F1EE; }
+.xfce4-panel button:checked:backdrop { background-color: rgba(59, 97, 191, 0.22); background-image: none; color: #F2F1EE; }
 treeview.view:selected:backdrop, .view:selected:backdrop, iconview:selected:backdrop,
 row:selected:backdrop, flowboxchild:selected:backdrop {
   background-color: rgba(59, 97, 191, 0.35);
@@ -461,3 +466,18 @@ notebook > header > tabs > tab:checked:backdrop { background-color: rgba(59, 97,
 check:backdrop, radio:backdrop, switch:backdrop { background-color: #141414; background-image: none; border-color: #3D3D3D; }
 check:checked:backdrop, radio:checked:backdrop, switch:checked:backdrop { background-color: #3B61BF; border-color: #3B61BF; color: #FFFFFF; }
 scrollbar slider:backdrop { background-color: #3D3D3D; }
+/* The states a widget is in while its window is unfocused. Adwaita paints
+   each of these itself (#141414/#1B1B1B/#353535 greys measured with
+   Gtk.StyleContext), and the generic rules above do not reach them: the
+   spinbutton, the sidebar rows, a checked path button or panel button, a
+   pressed button, the suggested and destructive actions, and the disabled
+   entry all win over `button:backdrop` or `entry:backdrop` on specificity.
+   These come last so they also win here, and every fill is a token again. */
+spinbutton:not(.vertical):backdrop, spinbutton.vertical:backdrop > entry { background-color: #141414; background-image: none; border-color: #2A2A2A; color: #F2F1EE; }
+placessidebar row:backdrop, placessidebar row:backdrop label, placessidebar row:backdrop image, stacksidebar row:backdrop { color: #F2F1EE; }
+.path-bar button:checked:backdrop, stackswitcher button:checked:backdrop { background-color: rgba(59, 97, 191, 0.22); color: #F2F1EE; }
+button:active:backdrop, button:checked:backdrop { background-color: #1C1C1C; background-image: none; border-color: #C7C5BF; color: #F2F1EE; }
+button.suggested-action:backdrop { background-color: #3B61BF; border-color: #3B61BF; color: #FFFFFF; }
+button.destructive-action:backdrop { background-color: transparent; border-color: #FA5A5A; color: #FA5A5A; }
+button:disabled:backdrop { border-color: #2A2A2A; color: #8C8C8C; }
+entry:disabled:backdrop { background-color: #0D0D0D; border-color: #2A2A2A; color: #8C8C8C; }

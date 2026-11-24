@@ -205,6 +205,11 @@ body {
   color: #F2F1EE;
   border: 1px solid #3D3D3D;
   border-radius: 6px;
+  /* input.css gives every select min-width:8em and text-overflow:ellipsis,
+     which cuts the scaling-mode select at "Remote r..." in a 1440x900 window.
+     14em shows the longest option, "Remote resizing", with the arrow and the
+     padding; the panel's own max-width still keeps it on screen. */
+  min-width: 14em;
 }
 .noVNC_panel select[size]:not([size="1"]),
 .noVNC_panel select[multiple] {
@@ -222,6 +227,24 @@ body {
 }
 .noVNC_panel option:not(:checked) {
   background-color: #141414;
+}
+
+/* The panel's checkboxes and switches. input.css paints an unchecked one with
+   --novnc-buttongrey, which the remap makes #1C1C1C: on the panel's #171717
+   it is invisible, so the "View only" and "Clip to window" toggles read as
+   blank lines. line-2 (#3D3D3D) is the control line the rest of the theme
+   gives an unchecked box. The checked fill is pinned to the accent, the value
+   --novnc-blue already resolves to, and a radio keeps input.css's own
+   checked look (white centre, 4px accent ring): one rule must not flatten
+   that dot. The toggle's knob is its ::before, which input.css fills white;
+   nothing here touches it. */
+.noVNC_panel input[type=checkbox]:not(:checked),
+.noVNC_panel input[type=radio]:not(:checked) {
+  background-color: #3D3D3D;
+  background-image: none;
+}
+.noVNC_panel input[type=checkbox]:checked {
+  background-color: #3B61BF;
 }
 
 /* The status line (Connecting, Disconnected, connection errors). Only its

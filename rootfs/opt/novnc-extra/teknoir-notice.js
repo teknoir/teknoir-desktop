@@ -28,10 +28,20 @@
     // noVNC's own status line, also fixed at the top, moves down with it.
     // Otherwise the banner covers the top of the remote screen (the XFCE
     // panel) and noVNC's status text.
+    //
+    // A positioned #noVNC_container comes later in the DOM than noVNC's
+    // .noVNC_center layers (the connect dialog and the credentials and
+    // verify-server dialogs), which are position:fixed with z-index auto, so
+    // it would paint over them and a notice plus autoconnect=0 shows black
+    // where the dialog is. z-index 1 lifts those layers back above it:
+    // elementFromPoint at the dialog's centre is then the connect button
+    // again, not the container. #noVNC_fallback_error keeps its own z-index
+    // 1000, because its id selector outranks the class.
     var room = document.createElement("style");
     room.textContent =
       "#noVNC_container{position:relative;top:24px;height:calc(100% - 24px)}" +
-      "#noVNC_status{top:24px}";
+      "#noVNC_status{top:24px}" +
+      ".noVNC_center{z-index:1}";
     document.head.appendChild(room);
 
     var bar = document.createElement("div");

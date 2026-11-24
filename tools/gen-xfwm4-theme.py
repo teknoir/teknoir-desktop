@@ -37,10 +37,14 @@ libXpm:
   ignores symbols still shows the theme, and the `xfwm4-theme` test can prove
   the two never diverge.
 
-Sizes and shape follow the design: title, top-left and top-right are 1x30, the
-four edges and the bottom corners are 1x1, and every button is 30x30 with the
-glyph in a 10x10 box at x 10..19, y 10..19. Adding them up: 10 title + 4 top +
-10 edge + 16 button files, plus `themerc` and `README`, is 42 files.
+Sizes and shape follow the design: a title file is 1x30, a border row over 29
+fill rows. A top-left or top-right file is 1x30 of the border colour only,
+every pixel: xfwm4 draws those two corners over the title bar's full height,
+so a corner that copied the title left the window's side line missing beside
+the title and an inactive title merged into the black around it. The four
+edges and the bottom corners are 1x1, and every button is 30x30 with the glyph
+in a 10x10 box at x 10..19, y 10..19. Adding them up: 10 title + 4 top + 10
+edge + 16 button files, plus `themerc` and `README`, is 42 files.
 
 Usage:
     tools/gen-xfwm4-theme.py --out DIR     write every file into DIR
@@ -226,12 +230,24 @@ def xpm_text(filename, width, height, rows, symbols):
 
 
 def bar_rows():
-    """A 1x30 title or top file: the border row, then 29 fill rows.
+    """A 1x30 title file: the border row, then 29 fill rows.
 
     Width is 1, so every row is one character. Kept in one function so the
-    shape of every 1x30 file is defined once.
+    shape of every 1x30 title file is defined once.
     """
     return [BORDER] + [FILL] * 29
+
+
+def corner_rows():
+    """A 1x30 top-left or top-right file: the border colour on every pixel.
+
+    This was once a copy of the title bar, which left the side line missing
+    for the title's whole height. xfwm4 stacks the corner file against the
+    title, so the frame reads as a broken line beside the title, and an
+    inactive title (#000000) merged into the black outside it. One colour,
+    one symbol, and the line runs unbroken from the top edge down.
+    """
+    return [BORDER] * 30
 
 
 def button_rows(kind, state):
@@ -253,14 +269,17 @@ def build():
         fill_key = state + "_color_1"
         symbols = [(BORDER, border_key), (FILL, fill_key)]
         rows = bar_rows()
-        # title-1..5, top-left and top-right are all the same 1x30 bar; xfwm4
-        # wants one file per slot, and they differ only in name.
+        # title-1..5 are the same 1x30 bar; xfwm4 wants one file per slot, and
+        # they differ only in name.
         for n in range(1, 6):
             name = "title-%d-%s.xpm" % (n, state)
             files[name] = xpm_text(name, 1, 30, rows, symbols)
+        # The top corners are the border colour for the title's full height,
+        # not a copy of the bar: the side line has to run past the title.
         for corner in ("top-left", "top-right"):
             name = "%s-%s.xpm" % (corner, state)
-            files[name] = xpm_text(name, 1, 30, rows, symbols)
+            files[name] = xpm_text(name, 1, 30, corner_rows(),
+                                   [(BORDER, border_key)])
         # The frame: one 1x1 file per edge, all in the border colour.
         for edge in ("left", "right", "bottom", "bottom-left", "bottom-right"):
             name = "%s-%s.xpm" % (edge, state)
@@ -290,7 +309,9 @@ def build():
         "of surface and the chrome spends no colour. The buttons are 1 px glyphs on\n"
         "that fill, the frame is a 1 px line, and there is no menu button:\n"
         "right-click the title bar or press Alt+Space for the window menu. Resize\n"
-        "with Alt+right-drag, since the 1 px border is hard to grab.\n"
+        "with Alt+right-drag, since the 1 px border is hard to grab. The two top\n"
+        "corners are border colour all the way down, so the side line is unbroken\n"
+        "beside the title.\n"
     )
 
     return files
@@ -306,6 +327,16 @@ def write_tree(outdir, files):
 def cmd_out(outdir):
     files = build()
     write_tree(outdir, files)
+    # A file this generator no longer writes (a shape dropped from the theme)
+    # would stay behind and --check would report it as extra, which `make
+    # theme` could never fix. Remove it here, and say which, so the removal is
+    # visible rather than a silent delete. Only regular files: a directory in
+    # the output is not a stale theme file.
+    for name in sorted(os.listdir(outdir)):
+        path = os.path.join(outdir, name)
+        if name not in files and os.path.isfile(path):
+            os.unlink(path)
+            print("removed %s" % name)
     print("wrote %d files to %s" % (len(files), outdir))
     return 0
 

@@ -140,7 +140,11 @@ env:
   container and status line move down 24 px and the remote desktop is 24 px
   shorter while the banner shows, and it gets its full height back after `×`.
   A click anywhere on the banner (the `×` included) does not move keyboard
-  focus, which stays on the VNC canvas.
+  focus, which stays on the VNC canvas. The moved container is positioned and
+  comes later in the DOM than noVNC's centred dialogs, so the same room rule
+  also lifts those dialogs (`.noVNC_center{z-index:1}`) above it: the connect
+  dialog and the credentials and verify-server dialogs stay visible instead
+  of being painted over by black.
 - noVNC's status line (Connecting, Disconnected, connection errors) moves down
   with the page and opens just below the banner, so the banner and the
   connection feedback are both readable. The banner's z-index is 99, below
@@ -275,11 +279,23 @@ and the `xfwm4-theme` test proves the two never diverge.
   keeps its content colours, and only the title bar says who has focus.
 - There is no menu button (`button_layout=|HMC` is hide, maximize, close):
   right-click the title bar or press Alt+Space for the window menu.
-- The frame is a 1 px line (`#3D3D3D` active, `#2A2A2A` inactive). That is
-  hard to grab by mouse, so resize with Alt+right-drag.
+- The frame is a 1 px line (`#3D3D3D` active, `#2A2A2A` inactive). The two
+  top corners are border colour for the title bar's full height, so the line
+  is unbroken beside the title instead of merging into the black. A 1 px line
+  is hard to grab by mouse, so resize with Alt+right-drag.
 - Buttons are 1 px glyphs at a neutral brightness; even close on hover stays
   neutral, because colour is reserved for status. Shadows and compositing are
   off.
+
+**Chromium's frame.** `rootfs/etc/chromium/master_preferences` is Debian's
+file with one key added, `"custom_chrome_frame": false` under `"browser"`.
+Without it Chromium draws its own client-side frame, an opaque
+`#353535`/`#1B1B1B` band that is Adwaita grey, with no Teknoir title bar and
+no focus cue; with the pref off, xfwm4 frames Chromium like every other
+window. It applies to new profiles only, which is what the image has (the
+examples' home is an `emptyDir`), and it costs the 30 px of height the title
+bar takes. The file replaces Debian's because `COPY rootfs/ /` comes after the
+apt install, and JSON has no comments, so the reason lives here.
 
 **Panel.** `rootfs/etc/xdg/xfce4/panel/default.xml` replaces Debian's;
 xfce4-panel's `migrate` applies it silently to a home with no panel config of
@@ -300,16 +316,19 @@ text-2, muted and text, with the six brights mixed 30% toward white. Every
 entry but the line reaches 4.5:1 on black; `terminal-config` recomputes both
 rules.
 
-**Backdrop.** `xfce4-desktop.xml` is plain `#000000`, one entry per workspace,
-under `monitorVNC-0`: xfdesktop keys the backdrop by the X connector name, and
-TigerVNC reports it as `VNC-0`. The file this replaced used `monitor0`, which
-never matched, so the colour it named never applied. There is no desktop
+**Backdrop.** `xfce4-desktop.xml` is plain `#000000`, one backdrop for every
+workspace, under `monitorVNC-0`: xfdesktop keys the backdrop by the X connector
+name, and TigerVNC reports it as `VNC-0`. xfdesktop 4.20 runs in
+single-workspace mode and draws `workspace0` on every workspace, so the file
+sets that mode explicitly instead of carrying one entry per workspace (a
+`workspace1` entry is never read). The file this replaced used `monitor0`,
+which never matched, so the colour it named never applied. There is no desktop
 logo: a solid frame costs almost nothing to move, a clean desktop keeps bot
 screenshots clean, and nextgen keeps the brand in its chrome, as the panel's
 menu button does.
 
-`xfwm4.xml` sets the theme, the title font and layout, two workspaces named
-"1" and "2" for the pager, and turns the dock, frame and popup shadows off.
+`xfwm4.xml` sets the theme, the title font, two workspaces and their names, and
+turns shadows off.
 The `theme-contrast` test holds the theme's readable pairs at 4.5:1.
 
 **The noVNC page.** `rootfs/opt/novnc-extra/teknoir.css` brings the same tokens
@@ -551,8 +570,9 @@ make image-council # the council image, amd64: make image-council TNCTL_REF=<com
 ```
 
 The test suite needs no docker and no root. It runs `shellcheck -x` over every
-script, `hadolint` over the Dockerfile, validates the Chromium policy JSON and
-the xfconf XML, compares the entrypoint's `DESKTOP_DRY_RUN=1` output against the
+script, `hadolint` over the Dockerfile, validates the Chromium policy JSON, the
+Chromium preferences and the xfconf XML, compares the entrypoint's
+`DESKTOP_DRY_RUN=1` output against the
 vectors in `test/vectors/` (the defaults of both modes, overrides, and the
 validation errors with their exit codes), checks the `DESKTOP_NOTICE` rules and
 the `notice.json` file it writes, runs `desktop-browser` with stub
@@ -561,7 +581,12 @@ Singleton files are removed, checks the `index.html` redirect logic and
 `teknoir-notice.js` against a stand-in page with `node`, and runs
 `desktop-healthcheck` against a stand-in RFB server and a
 stand-in web server, including a server that refuses the connection the way a
-blacklisted Xvnc does. It checks the council image the same way, without
+blacklisted Xvnc does. The theme has its own checks: the theme XML, the GTK
+theme (with the optional GTK parse when GTK3 and python-gi are installed), the
+GTK settings, the fonts, the Dockerfile's theme packages, the palette and the
+contrast pairs; the generated xfwm4 theme and its generator, the panel, the
+terminal and the backdrop; the noVNC stylesheet and the notice theme; and the
+Chromium preferences. It checks the council image the same way, without
 docker: that the old agent image is gone, the stage and its parent, the
 OpenCode pin, the entrypoint, user and environment, every rule of
 `opencode.json`, and that `make image-council` refuses anything but a full

@@ -161,6 +161,32 @@ if data.get("CommandLineFlagSecurityWarningsEnabled") is not False:
   fi
 }
 
+# /etc/chromium/master_preferences is Debian's file plus one key:
+# browser.custom_chrome_frame=false makes xfwm4 frame Chromium like any other
+# window, instead of its own opaque grey client-side frame with no Teknoir
+# title bar and no focus cue. Debian's keys have to survive the copy.
+test_chromium_prefs() {
+  if python3 -I -c '
+import json, sys
+with open("rootfs/etc/chromium/master_preferences", encoding="utf-8") as fh:
+    prefs = json.load(fh)
+if not isinstance(prefs, dict) or not prefs:
+    sys.exit("master_preferences is not a non-empty JSON object")
+if prefs.get("browser", {}).get("custom_chrome_frame") is not False:
+    sys.exit("browser.custom_chrome_frame is not false")
+if prefs.get("distribution", {}).get("import_bookmarks") is not False:
+    sys.exit("distribution.import_bookmarks is not the stock false")
+if prefs.get("browser", {}).get("check_default_browser") is not False:
+    sys.exit("browser.check_default_browser is not the stock false")
+if prefs.get("signin", {}).get("allowed") is not False:
+    sys.exit("signin.allowed is not the stock false")
+' >"$TMP/chromium-prefs.out" 2>&1; then
+    pass chromium-prefs
+  else
+    fail chromium-prefs "$(tr '\n' '|' <"$TMP/chromium-prefs.out")"
+  fi
+}
+
 test_xfconf_xml() {
   if python3 -I -c '
 import glob, sys
@@ -407,7 +433,8 @@ errors = []
 def on_error(provider, section, error):
     line = "?"
     if section is not None:
-        line = str(section.get_start_location().line + 1)
+        # GTK3's CssSection has get_start_line(), not GTK4's get_start_location().
+        line = str(section.get_start_line() + 1)
     errors.append("line %s: %s" % (line, error.message))
 
 
@@ -503,7 +530,15 @@ want(xs, "/Xft/Antialias", "1", "xsettings")
 want(xs, "/Xft/Hinting", "1", "xsettings")
 want(xs, "/Xft/HintStyle", "hintslight", "xsettings")
 want(xs, "/Xft/RGBA", "none", "xsettings")
+want(xs, "/Xft/Lcdfilter", "lcddefault", "xsettings")
 want(xs, "/Xft/DPI", "96", "xsettings")
+want(xs, "/Gtk/DialogsUseHeader", "false", "xsettings")
+want(g3, "gtk-cursor-theme-size", "24", "gtk-3.0")
+# Keys outside the theme keep Debian's stock values: the double-click window
+# is still 400 ms (250 splits double-clicks over VNC jitter), and a title-bar
+# middle click still lowers the window.
+want(xs, "/Net/DoubleClickTime", "400", "xsettings")
+want(xs, "/Gtk/TitlebarMiddleClick", "lower", "xsettings")
 
 if problems:
     sys.exit("; ".join(problems))
@@ -691,6 +726,26 @@ test_xfwm4_theme() {
     fail xfwm4-theme-generated "$(tr '\n' '|' <"$TMP/xfwm4-generated.out")"
   fi
 
+  # --out must clear stale files. A file an earlier theme left in the output
+  # directory would otherwise stay there for ever: --check reports it as
+  # "extra", and `make theme` could never fix that. The generator removes it,
+  # says which, and the result then checks clean.
+  local gen_tmp gen_out
+  gen_tmp="$(mktemp -d "${TMPDIR:-/var/tmp}/teknoir-xfwm4-out.XXXXXX")"
+  gen_out="$gen_tmp/theme"
+  mkdir -p "$gen_out"
+  cp "$XFWM4_DIR"/* "$gen_out"/
+  printf 'stale\n' >"$gen_out/old-title.xpm"
+  if python3 -I tools/gen-xfwm4-theme.py --out "$gen_out" >"$TMP/xfwm4-out.out" 2>&1 &&
+    [ ! -e "$gen_out/old-title.xpm" ] &&
+    grep -qx "removed old-title.xpm" "$TMP/xfwm4-out.out" &&
+    python3 -I tools/gen-xfwm4-theme.py --check "$gen_out" >>"$TMP/xfwm4-out.out" 2>&1; then
+    pass xfwm4-theme-out
+  else
+    fail xfwm4-theme-out "$(tr '\n' '|' <"$TMP/xfwm4-out.out")"
+  fi
+  rm -rf "$gen_tmp"
+
   if python3 -I - "$XFWM4_DIR" "$XFWM4_XML" >"$TMP/xfwm4-theme.out" 2>&1 <<'PY'
 import os
 import re
@@ -856,6 +911,7 @@ def parse(name, want_w, want_h):
     if len(rows) != height:
         problems.append("%s: %d rows, header says %d" % (name, len(rows), height))
         return
+    used = set()
     for index, row in enumerate(rows):
         match = re.match(r'^"([^"]*)",$', row)
         if not match:
@@ -869,20 +925,32 @@ def parse(name, want_w, want_h):
             if char not in palette:
                 problems.append("%s: pixel %r is not in the palette" % (name, char))
                 break
+            used.add(palette[char])
         if index == 0:
             # Row 0 is the top border in every title, top, edge and button.
             first = {palette.get(char) for char in pixels}
             if None in first or not all(s.endswith("_border_color") for s in first):
                 problems.append("%s: row 0 is not all border colour" % name)
+    # The top corners sit against the title bar for its whole height. They
+    # must be the side line, nothing else: a copy of the title bar there left
+    # the window's edge missing beside the title.
+    if name.startswith(("top-left-", "top-right-")):
+        if len(used) != 1 or not next(iter(used)).endswith("_border_color"):
+            problems.append("%s: paints %r, want only the border colour"
+                            % (name, sorted(used)))
 
 
 for name, (want_w, want_h) in sorted(sizes.items()):
     if os.path.isfile(os.path.join(theme_dir, name)):
         parse(name, want_w, want_h)
 
-# The xfconf channel must ask for this theme and repeat its layout, so a user
-# copy or a theme swap cannot leave the title bar and the frame disagreeing.
+# The xfconf channel must ask for this theme and repeat its layout. themerc is
+# what decides (xfwm4 reads the layout from it; a live test showed a disagreeing
+# channel changed nothing), so the channel's job is to keep xfwm4-settings
+# showing what is in effect. The two still have to say the same thing, or the
+# settings dialog would lie about the title bar.
 props = {}
+nodes = {}
 
 
 def walk(el):
@@ -891,6 +959,7 @@ def walk(el):
             walk(child)
         else:
             props[child.get("name")] = child.get("value")
+            nodes[child.get("name")] = child
 
 
 walk(ET.parse(xfwm_xml).getroot())
@@ -902,6 +971,25 @@ for key in ("button_layout", "title_alignment"):
                         % (key, props.get(key), values.get(key)))
 if not (props.get("title_font") or "").startswith("Hanken Grotesk"):
     problems.append("xfwm4.xml title_font is %r" % (props.get("title_font"),))
+# Shadows are off as bool false, not a zero or a string: without a compositor
+# xfwm4 can only paint a "shadow" as more border.
+for key in ("show_dock_shadow", "show_frame_shadow", "show_popup_shadow"):
+    node = nodes.get(key)
+    if node is None or node.get("type") != "bool" or node.get("value") != "false":
+        problems.append("xfwm4.xml %s is not bool false" % key)
+# The names matter, not just their count: the pager draws them, and "1"/"2"
+# are short where xfwm4's default "Workspace N" is long.
+count_node = nodes.get("workspace_count")
+count = int(count_node.get("value")) if count_node is not None else 0
+names_node = nodes.get("workspace_names")
+if names_node is None or names_node.get("type") != "array":
+    problems.append("xfwm4.xml workspace_names is not an array")
+else:
+    names = [value.get("value") for value in names_node.findall("value")]
+    want_names = [str(index + 1) for index in range(count)]
+    if names != want_names:
+        problems.append("xfwm4.xml workspace_names is %r, want %r"
+                        % (names, want_names))
 
 if problems:
     sys.exit("; ".join(problems[:10]))
@@ -1114,6 +1202,16 @@ def mix30(value):
 
 
 if len(palette) == 16:
+    # The base order, not just the rules: line, crit, ok, warn, fleet, type,
+    # override, text-2, muted, text. That is the token order a program's own
+    # colour names expect (ANSI 0-8 and bright white), and the six brights in
+    # between are derived from it.
+    BASES = ["#2A2A2A", "#FA5A5A", "#2BC966", "#F5B02E", "#6F90EA", "#C25BA6",
+             "#2BB8C4", "#C7C5BF", "#8C8C8C", "#F2F1EE"]
+    got = palette[0:9] + palette[15:]
+    if [value.upper() for value in got] != BASES:
+        problems.append("the palette's base order is %r, want %r"
+                        % (got, BASES))
     # Brights at 9..14 come from the bases at 1..6.
     for index in range(9, 15):
         want_bright = mix30(palette[index - 8])
@@ -1160,7 +1258,8 @@ PY
 }
 
 # The backdrop: the monitor key is the connector name TigerVNC reports
-# (VNC-0), one black workspace per xfwm4 workspace, no image.
+# (VNC-0), one black backdrop for every workspace (single-workspace mode),
+# no image.
 test_desktop_backdrop() {
   if python3 -I - "$DESKTOP_XML" "$XFWM4_XML" >"$TMP/desktop-backdrop.out" 2>&1 <<'PY'
 import sys
@@ -1186,7 +1285,14 @@ def want(el, name, kind, value, where):
 
 
 root = ET.parse(desktop_path).getroot()
-screen0 = prop(prop(root, "backdrop"), "screen0")
+backdrop = prop(root, "backdrop")
+if backdrop is None:
+    sys.exit("no backdrop")
+# xfdesktop 4.20 runs in single-workspace mode and draws workspace0 for every
+# workspace. A workspace1 entry would never be read, so it is not there.
+want(backdrop, "single-workspace-mode", "bool", "true", "backdrop")
+want(backdrop, "single-workspace-number", "int", "0", "backdrop")
+screen0 = prop(backdrop, "screen0")
 if screen0 is None:
     sys.exit("no backdrop/screen0")
 monitors = [child.get("name") for child in screen0.findall("property")]
@@ -1202,12 +1308,11 @@ count = int(count_node.get("value")) if count_node is not None else 0
 if count <= 0:
     problems.append("xfwm4.xml has no usable workspace_count")
 
-for index in range(count):
-    name = "workspace%d" % index
-    workspace = prop(monitor, name)
-    if workspace is None:
-        problems.append("no %s" % name)
-        continue
+name = "workspace0"
+workspace = prop(monitor, name)
+if workspace is None:
+    problems.append("no %s" % name)
+else:
     for key, kind, value in (
             ("color-style", "int", "0"),
             ("image-style", "int", "0"),
@@ -1222,6 +1327,9 @@ for index in range(count):
         values = [float(v.get("value")) for v in node.findall("value")]
         if values != [0.0, 0.0, 0.0, 1.0]:
             problems.append("%s: %s is %r, want [0,0,0,1]" % (name, key, values))
+if prop(monitor, "workspace1") is not None:
+    problems.append("monitorVNC-0 still has workspace1; "
+                    "xfdesktop 4.20 reads workspace0 for every workspace")
 
 if problems:
     sys.exit("; ".join(problems[:10]))
@@ -1248,6 +1356,7 @@ PAIRS = [
     ("#FFFFFF", "#426DD6"),                # on-accent on accent hover
     ("#F2F1EE", "#171717"),                # menu text on pop
     ("#F2F1EE", "rgba(59,97,191,0.35)"),   # selected row over black
+    ("#F2F1EE", "rgba(59,97,191,0.22)"),   # selected sidebar row, other fill
     # The browser side (step 3): the notice banner, its close button, the
     # noVNC connect button and the noVNC panels.
     ("#F2F1EE", "#141414"),                # notice banner text on surface
@@ -1529,6 +1638,25 @@ for selectors, body in rule_re.findall(stripped):
         if name in ("top", "height", "position"):
             problems.append("%s sets %s, which the notice banner owns" % (
                 selectors, name))
+
+# The panel's unchecked toggles and boxes. input.css paints them #1C1C1C on
+# the #171717 panel, where they are invisible; the theme's line-2 (#3D3D3D)
+# is the fix, and the rule has to be scoped to .noVNC_panel so it cannot
+# reach a control outside the panel.
+toggle_rules = [(selectors.strip(), body) for selectors, body in
+                rule_re.findall(stripped)
+                if "input[type=checkbox]" in selectors and
+                ":not(:checked)" in selectors]
+if not toggle_rules:
+    problems.append("no rule for the unchecked panel checkbox (fix 13)")
+else:
+    for selectors, body in toggle_rules:
+        if ".noVNC_panel" not in selectors:
+            problems.append("the unchecked checkbox rule is not scoped to "
+                            ".noVNC_panel: %s" % selectors)
+        if not re.search(r"background-color\s*:\s*#3D3D3D\s*;", body):
+            problems.append("the unchecked checkbox is not line-2 (#3D3D3D): %s"
+                            % body.strip())
 
 if problems:
     sys.exit("; ".join(problems))
@@ -3083,8 +3211,16 @@ const json = (value) => () => Promise.resolve(value);
     // its full height under the banner), and a later rule could undo a move.
     const room = rooms[0].textContent;
     assert(room === "#noVNC_container{position:relative;top:24px;height:calc(100% - 24px)}" +
-      "#noVNC_status{top:24px}",
+      "#noVNC_status{top:24px}" +
+      ".noVNC_center{z-index:1}",
       "the style that makes room for the banner is '" + room + "'");
+    // The moved container comes later in the DOM than noVNC's fixed
+    // .noVNC_center layers (the connect dialog and the credentials and
+    // verify-server dialogs) and would paint over them; z-index 1 puts the
+    // dialogs back on top, or a notice with autoconnect=0 shows black.
+    assert(/\.noVNC_center\{z-index:1\}/.test(room),
+      "the room style does not lift noVNC's centred dialogs above the " +
+        "container: " + room);
     assert(/(^|;)height:24px;/.test(banner.style.cssText) &&
       /(^|;)line-height:24px(;|$)/.test(banner.style.cssText),
       "the banner is not 24px high, the room the style makes: " + banner.style.cssText);
@@ -4149,6 +4285,7 @@ test_council_makefile() {
 test_shellcheck
 test_hadolint
 test_chromium_policy_json
+test_chromium_prefs
 test_xfconf_xml
 test_theme_xml
 test_gtk_theme
