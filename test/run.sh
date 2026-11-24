@@ -37,6 +37,13 @@ BROWSER="rootfs/usr/local/bin/desktop-browser"
 HEALTHCHECK="rootfs/usr/local/bin/desktop-healthcheck"
 INDEX="rootfs/opt/novnc-extra/index.html"
 NOTICE_JS="rootfs/opt/novnc-extra/teknoir-notice.js"
+GTK_THEME_DIR="rootfs/usr/share/themes/Teknoir"
+GTK_CSS="$GTK_THEME_DIR/gtk-3.0/gtk.css"
+GTK3_INI="rootfs/etc/gtk-3.0/settings.ini"
+GTK4_INI="rootfs/etc/gtk-4.0/settings.ini"
+XS_SETTINGS="rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
+FONTS_CONF="rootfs/etc/fonts/local.conf"
+TEKNOIR_MARK="rootfs/usr/share/teknoir/teknoir-mark.svg"
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/teknoir-desktop-test.XXXXXX")"
 # Background servers the health-probe tests start.
@@ -165,6 +172,495 @@ for path in files:
     pass xfconf-xml
   else
     fail xfconf-xml "$(tr '\n' '|' <"$TMP/xml.out")"
+  fi
+}
+
+# --- the theme ---------------------------------------------------------------
+#
+# Step 1 of the Teknoir theme: the GTK3 theme, the GTK settings files, the
+# xsettings channel, the fonts and the logo. The xfwm4 theme, the panel, the
+# terminal, the backdrop and the noVNC CSS come in later steps; the palette
+# test already carries the colours those steps need, and gathers the files
+# they paint by appending their paths to its list.
+
+# The only colours a Teknoir desktop may paint, from the dark tokens of
+# Backstage nextgen (plugins/backstage-plugin-teknoir-fleet/src/theme/tokens.css
+# in github.com/teknoir/backstage), the brand and layer colours, and what the
+# desktop derives from them. theme_palette_scan FILE... reads CSS and SVG
+# files (comments included, and stripped: a comment may quote another
+# program's colours) and exits non-zero on any #hex or rgba() outside the set.
+# Hex is compared case-insensitively, and #ABC counts as #AABBCC.
+theme_palette_scan() {
+  python3 -I - "$@" >"$TMP/theme-palette.out" 2>&1 <<'PY'
+import re
+import sys
+
+TOKENS = [
+    "#000000",  # bg
+    "#141414",  # surface
+    "#1C1C1C",  # surface-2
+    "#171717",  # pop
+    "#2A2A2A",  # line
+    "#3D3D3D",  # line-2
+    "#F2F1EE",  # text
+    "#C7C5BF",  # text-2
+    "#8C8C8C",  # muted
+    "#3B61BF",  # accent
+    "#8CA7F2",  # accent-ink
+    "#9DB4F7",  # focus
+    "#2BC966",  # ok
+    "#F5B02E",  # warn
+    "#FA5A5A",  # crit
+    "#FFFFFF",  # on-accent
+    "#0D0D0D",  # dim-fill
+    "#E0DED9",  # wordmark
+    "#E0AD1B", "#ED6D36", "#3B61BF", "#9B357D",  # brand
+    "#C25BA6", "#6F90EA", "#2BB8C4",  # layer: type, fleet, override
+    "#426DD6",  # accent hover, accent at brightness 1.12
+    # The terminal's brights (step 2): each base colour mixed 30% toward
+    # white. They are allowed from here so that step need not touch this list.
+    "#FC8C8C", "#6BD994", "#F8C86D", "#9AB1F0", "#D48CC1", "#6BCDD6",
+]
+ALLOWED = {c.upper() for c in TOKENS}
+
+# rgba() may only mix the accent (selection fills) and black (shadows), with
+# any alpha.
+RGBA = {(59, 97, 191), (0, 0, 0)}
+
+
+def full(value):
+    """#ABC and #AABBCC compare as #AABBCC; an 8-digit value keeps its alpha."""
+    digits = value[1:]
+    if len(digits) == 3:
+        digits = "".join(ch * 2 for ch in digits)
+    return "#" + digits.upper()
+
+
+problems = []
+hex_re = re.compile(
+    r"(?<![0-9A-Za-z_#])#([0-9A-Fa-f]{8}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{3})(?![0-9A-Za-z_])")
+rgba_re = re.compile(r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([0-9.]+)\s*\)")
+
+for path in sys.argv[1:]:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    for value in hex_re.findall(text):
+        if full("#" + value) not in ALLOWED:
+            problems.append("%s: #%s" % (path, value))
+    for r, g, b, _alpha in rgba_re.findall(text):
+        if (int(r), int(g), int(b)) not in RGBA:
+            problems.append("%s: rgba(%s,%s,%s,...)" % (path, r, g, b))
+    # An rgba() the expression above does not read (odd spacing, a different
+    # form) would otherwise pass unseen.
+    if "rgba(" in rgba_re.sub("", text):
+        problems.append("%s: an rgba() this test cannot read" % path)
+
+if problems:
+    sys.exit("; ".join(problems[:10]))
+PY
+}
+
+# local.conf and the logo parse; the logo is the four brand paths in a 20x20
+# box, so the panel, the noVNC page (step 3) and any rasteriser agree.
+test_theme_xml() {
+  if python3 -I - "$FONTS_CONF" "$TEKNOIR_MARK" >"$TMP/theme-xml.out" 2>&1 <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+BRAND = ["#E0AD1B", "#ED6D36", "#3B61BF", "#9B357D"]
+SVG = "{http://www.w3.org/2000/svg}"
+
+fonts_conf, mark = sys.argv[1], sys.argv[2]
+
+# local.conf carries a DOCTYPE with a system identifier; ElementTree parses
+# it and fetches nothing.
+for path in (fonts_conf, mark):
+    try:
+        ET.parse(path)
+    except ET.ParseError as exc:
+        sys.exit("%s: not well-formed XML: %s" % (path, exc))
+
+root = ET.parse(mark).getroot()
+if root.tag != SVG + "svg":
+    sys.exit("%s: root element is %r, not <svg>" % (mark, root.tag))
+if root.get("viewBox") != "0 0 20 20":
+    sys.exit("%s: viewBox is %r, not '0 0 20 20'" % (mark, root.get("viewBox")))
+
+paths = [el for el in root.iter() if el.tag == SVG + "path"]
+if len(paths) != 4:
+    sys.exit("%s: %d <path> elements, want 4" % (mark, len(paths)))
+fills = [(p.get("fill") or "").upper() for p in paths]
+if fills != BRAND:
+    sys.exit("%s: fills are %r, want %r" % (mark, fills, BRAND))
+PY
+  then
+    pass theme-xml
+  else
+    fail theme-xml "$(tr '\n' '|' <"$TMP/theme-xml.out")"
+  fi
+}
+
+# The GTK3 theme: index.theme names it, gtk.css imports Adwaita-dark first,
+# keeps its braces, carries the rules the desktop needs, and paints nothing
+# Adwaita's gradients, transitions or animations back on.
+test_gtk_theme() {
+  if python3 -I - "$GTK_THEME_DIR" "$GTK_CSS" >"$TMP/gtk-theme.out" 2>&1 <<'PY'
+import re
+import sys
+
+IMPORT = '@import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained-dark.css");'
+SELECTORS = [
+    "window", ".background:backdrop", "headerbar", "menu", "menuitem:hover",
+    "popover", "tooltip", "entry:focus", "button.suggested-action",
+    "scrollbar slider", "selection", "treeview.view",
+    "notebook > header > tabs > tab:checked", ".xfce4-panel.background",
+]
+INDEX = {
+    "GtkTheme": "Teknoir",
+    "MetacityTheme": "Teknoir",
+    "IconTheme": "Adwaita",
+    "CursorTheme": "Adwaita",
+}
+
+theme_dir, css_path = sys.argv[1], sys.argv[2]
+problems = []
+
+index = {}
+with open(theme_dir + "/index.theme", encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line or line.startswith(("[", "#")):
+            continue
+        key, sep, value = line.partition("=")
+        if sep:
+            index[key.strip()] = value.strip()
+for key, want in INDEX.items():
+    if index.get(key) != want:
+        problems.append("index.theme %s is %r, want %r" % (key, index.get(key), want))
+
+with open(css_path, encoding="utf-8") as fh:
+    source = fh.read()
+# Comments explain other programs' colours and mention transitions; only what
+# the theme itself contains counts.
+css = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+
+lines = [line.strip() for line in css.splitlines() if line.strip()]
+if not lines or lines[0] != IMPORT:
+    problems.append("the first statement is %r" % (lines[0] if lines else "nothing",))
+
+if css.count("{") != css.count("}"):
+    problems.append("braces do not balance (%d {, %d })" % (css.count("{"), css.count("}")))
+
+for selector in SELECTORS:
+    if selector not in css:
+        problems.append("no rule for %r" % selector)
+if "inset 0 -1px 0 0 #2A2A2A" not in css:
+    problems.append("no 1px line under the panel")
+for banned in ("gradient(", "transition", "animation"):
+    if banned in css:
+        problems.append("contains %r" % banned)
+
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    pass gtk-theme
+  else
+    fail gtk-theme "$(tr '\n' '|' <"$TMP/gtk-theme.out")"
+    return
+  fi
+
+  # The real parser, when GTK3 and python3-gi are here (they are not on the
+  # dev host, so this usually skips). The provider resolves Adwaita through
+  # the library, but it is an X client, so it needs a display.
+  if ! python3 -I -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' >/dev/null 2>&1; then
+    skip gtk-theme-parse "python3-gi with Gtk 3 is not installed"
+    return
+  fi
+  python3 -I - "$GTK_CSS" >"$TMP/gtk-parse.out" 2>&1 <<'PY'
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gio, Gtk
+
+ok = Gtk.init_check()
+if isinstance(ok, tuple):  # newer pygobject returns (ok, argv)
+    ok = ok[0]
+if not ok:
+    sys.exit(77)
+
+errors = []
+
+
+def on_error(provider, section, error):
+    line = "?"
+    if section is not None:
+        line = str(section.get_start_location().line + 1)
+    errors.append("line %s: %s" % (line, error.message))
+
+
+provider = Gtk.CssProvider()
+provider.connect("parsing-error", on_error)
+try:
+    provider.load_from_file(Gio.File.new_for_path(sys.argv[1]))
+except Exception as exc:  # noqa: BLE001 - any load failure is a failure
+    sys.exit("GTK could not load the file: %s" % exc)
+if errors:
+    sys.exit("GTK rejected %d rule(s): %s" % (len(errors), "; ".join(errors[:5])))
+PY
+  local rc=$?
+  case "$rc" in
+    0) pass gtk-theme-parse ;;
+    77) skip gtk-theme-parse "no X display for Gtk.init_check" ;;
+    *) fail gtk-theme-parse "$(tr '\n' '|' <"$TMP/gtk-parse.out")" ;;
+  esac
+}
+
+# The fallback settings files, xsettings.xml and the Xft values name the same
+# theme, icons, cursor and fonts, so a program gets the same look whichever
+# of them answers.
+test_gtk_settings() {
+  if python3 -I - "$GTK3_INI" "$GTK4_INI" "$XS_SETTINGS" >"$TMP/gtk-settings.out" 2>&1 <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+gtk3_ini, gtk4_ini, xsettings = sys.argv[1:]
+
+
+def read_ini(path):
+    values = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith(("#", "[")):
+                continue
+            key, sep, value = line.partition("=")
+            if sep:
+                values[key.strip()] = value.strip()
+    return values
+
+
+def read_channel(path):
+    """Every xsettings property as {"/Group/Name": value}; empty groups are
+    the groups themselves and are descended into."""
+    values = {}
+
+    def walk(node, prefix):
+        for prop in node.findall("property"):
+            name = prefix + "/" + prop.get("name", "")
+            if prop.get("type") == "empty":
+                walk(prop, name)
+            else:
+                values[name] = prop.get("value")
+
+    walk(ET.parse(path).getroot(), "")
+    return values
+
+
+g3 = read_ini(gtk3_ini)
+g4 = read_ini(gtk4_ini)
+xs = read_channel(xsettings)
+problems = []
+
+
+def want(values, key, expected, label):
+    if values.get(key) != expected:
+        problems.append("%s %s is %r, want %r" % (label, key, values.get(key), expected))
+
+
+want(g3, "gtk-theme-name", "Teknoir", "gtk-3.0")
+want(xs, "/Net/ThemeName", "Teknoir", "xsettings")
+want(g3, "gtk-icon-theme-name", "Adwaita", "gtk-3.0")
+want(xs, "/Net/IconThemeName", "Adwaita", "xsettings")
+want(g3, "gtk-cursor-theme-name", "Adwaita", "gtk-3.0")
+want(xs, "/Gtk/CursorThemeName", "Adwaita", "xsettings")
+want(xs, "/Gtk/CursorThemeSize", "24", "xsettings")
+want(g3, "gtk-font-name", "Hanken Grotesk 10", "gtk-3.0")
+want(xs, "/Gtk/FontName", "Hanken Grotesk 10", "xsettings")
+want(g4, "gtk-font-name", "Hanken Grotesk 10", "gtk-4.0")
+want(xs, "/Gtk/MonospaceFontName", "JetBrains Mono 10", "xsettings")
+want(g3, "gtk-application-prefer-dark-theme", "true", "gtk-3.0")
+want(g4, "gtk-application-prefer-dark-theme", "true", "gtk-4.0")
+want(g3, "gtk-enable-animations", "false", "gtk-3.0")
+want(xs, "/Gtk/EnableAnimations", "false", "xsettings")
+want(g3, "gtk-xft-antialias", "1", "gtk-3.0")
+want(g3, "gtk-xft-hinting", "1", "gtk-3.0")
+want(g3, "gtk-xft-hintstyle", "hintslight", "gtk-3.0")
+want(g3, "gtk-xft-rgba", "none", "gtk-3.0")
+want(xs, "/Xft/Antialias", "1", "xsettings")
+want(xs, "/Xft/Hinting", "1", "xsettings")
+want(xs, "/Xft/HintStyle", "hintslight", "xsettings")
+want(xs, "/Xft/RGBA", "none", "xsettings")
+want(xs, "/Xft/DPI", "96", "xsettings")
+
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    pass gtk-settings
+  else
+    fail gtk-settings "$(tr '\n' '|' <"$TMP/gtk-settings.out")"
+  fi
+}
+
+# The fonts: fontconfig prefers them, and the Dockerfile pins and installs
+# them inside the desktop stage, before rootfs/ lands on top.
+test_fonts() {
+  if python3 -I - "$FONTS_CONF" Dockerfile >"$TMP/fonts.out" 2>&1 <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+PREFER = {
+    "sans-serif": "Hanken Grotesk",
+    "system-ui": "Hanken Grotesk",
+    "monospace": "JetBrains Mono",
+}
+FONT_FILES = [
+    "/tmp/fonts/HankenGrotesk-VF.ttf",
+    "/tmp/fonts/HankenGrotesk-OFL.txt",
+    "/tmp/fonts/JetBrainsMono-VF.ttf",
+    "/tmp/fonts/JetBrainsMono-OFL.txt",
+]
+
+conf_path, dockerfile = sys.argv[1:]
+problems = []
+
+root = ET.parse(conf_path).getroot()
+found = {}
+for alias in root.findall("alias"):
+    family = alias.findtext("family")
+    if family in PREFER:
+        found[family] = [p.text for p in alias.findall("prefer/family")]
+for family, font in PREFER.items():
+    if font not in found.get(family, []):
+        problems.append("%s: %s prefers %r, want %s" % (
+            conf_path, family, found.get(family), font))
+
+with open(dockerfile, encoding="utf-8") as fh:
+    text = fh.read()
+
+
+def at(pattern):
+    match = re.search(pattern, text, re.M)
+    return match.start() if match else -1
+
+
+if at(r"^ARG GOOGLE_FONTS_COMMIT=[0-9a-f]{40}$") < 0:
+    problems.append("no 40-hex ARG GOOGLE_FONTS_COMMIT")
+for name in ("HANKEN_GROTESK_SHA256", "HANKEN_GROTESK_OFL_SHA256",
+             "JETBRAINS_MONO_SHA256", "JETBRAINS_MONO_OFL_SHA256"):
+    if at(r"^ARG %s=[0-9a-f]{64}$" % name) < 0:
+        problems.append("no 64-hex ARG %s" % name)
+for path in FONT_FILES:
+    add = (r"^ADD https://raw\.githubusercontent\.com/google/fonts/"
+           r"\$\{GOOGLE_FONTS_COMMIT\}/\S+ %s$" % re.escape(path))
+    if at(add) < 0:
+        problems.append("no ADD of google/fonts to %s" % path)
+
+run = re.search(r"^RUN printf .*?(?=\n\n)", text, re.M | re.S)
+if not run:
+    problems.append("no font install RUN")
+else:
+    body = run.group(0)
+    for path in FONT_FILES:
+        if path not in body:
+            problems.append("the font RUN does not name %s" % path)
+    for needle in (
+            "sha256sum -c",
+            "install -d -m 0755 /usr/local/share/fonts/teknoir",
+            "install -m 0644",
+            "fc-cache -f /usr/local/share/fonts",
+            "fc-list | grep -qF 'HankenGrotesk-VF.ttf: Hanken Grotesk'",
+            "fc-list | grep -qF 'JetBrainsMono-VF.ttf: JetBrains Mono'"):
+        if needle not in body:
+            problems.append("the font RUN lacks %r" % needle)
+    copy = at(r"^COPY rootfs/ /$")
+    if copy < 0:
+        problems.append("no COPY rootfs/ /")
+    elif run.start() > copy:
+        problems.append("the fonts are installed after COPY rootfs/ /")
+    tnctl = at(r"^FROM .* AS tnctl$")
+    if tnctl >= 0 and run.start() > tnctl:
+        problems.append("the fonts are installed outside the desktop stage")
+
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    pass fonts
+  else
+    fail fonts "$(tr '\n' '|' <"$TMP/fonts.out")"
+  fi
+}
+
+# The desktop image can draw SVG (for the panel logo) and carries no icon
+# theme but Adwaita; rootfs/ lands after the packages, so xsettings.xml
+# replaces Debian's.
+test_dockerfile_theme_packages() {
+  if python3 -I - Dockerfile >"$TMP/dockerfile-theme.out" 2>&1 <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    text = fh.read()
+
+problems = []
+
+desktop = text.find(" AS desktop\n")
+tnctl = text.find(" AS tnctl\n")
+if desktop < 0 or tnctl < 0 or tnctl < desktop:
+    sys.exit("the desktop stage, or its end, is not there")
+stage = text[desktop:tnctl]
+
+install = stage.find("apt-get install -y --no-install-recommends")
+lists = stage.find("rm -rf /var/lib/apt/lists/*")
+librsvg = re.search(r"^ +librsvg2-common \\$", stage, re.M)
+if install < 0 or lists < 0:
+    problems.append("no desktop apt-get RUN found")
+elif not librsvg:
+    problems.append("librsvg2-common is not in the desktop apt list")
+elif not install < librsvg.start() < lists:
+    problems.append("librsvg2-common is not in the apt-get install list")
+
+if "grep -q 'image/svg' /usr/lib/*/gdk-pixbuf-2.0/2.10.0/loaders.cache" not in text:
+    problems.append("no gdk-pixbuf svg loader guard")
+
+lowered = text.lower()
+for banned in ("papirus", "elementary", "gnome-themes"):
+    if banned in lowered:
+        problems.append("the Dockerfile names %s" % banned)
+
+copy = text.find("COPY rootfs/ /")
+lists_all = text.find("rm -rf /var/lib/apt/lists/*")
+if copy < 0:
+    problems.append("no COPY rootfs/ /")
+elif copy < lists_all:
+    problems.append("COPY rootfs/ / comes before the desktop packages, so "
+                    "xsettings.xml cannot replace Debian's")
+
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    pass dockerfile-theme-packages
+  else
+    fail dockerfile-theme-packages "$(tr '\n' '|' <"$TMP/dockerfile-theme.out")"
+  fi
+}
+
+# Every colour the theme paints is a Teknoir token. Later steps append their
+# files (the xfwm4 theme, the noVNC CSS and the notice script) to this list.
+test_theme_palette() {
+  local files=("$GTK_CSS" "$TEKNOIR_MARK")
+  if theme_palette_scan "${files[@]}"; then
+    pass theme-palette
+  else
+    fail theme-palette "$(tr '\n' '|' <"$TMP/theme-palette.out")"
   fi
 }
 
@@ -2790,6 +3286,12 @@ test_shellcheck
 test_hadolint
 test_chromium_policy_json
 test_xfconf_xml
+test_theme_xml
+test_gtk_theme
+test_gtk_settings
+test_fonts
+test_dockerfile_theme_packages
+test_theme_palette
 test_seccomp_profile
 test_novnc_extra
 test_dockerfile_dev_shm

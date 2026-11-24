@@ -6,8 +6,9 @@
 #   virtual  Xvnc + XFCE + Chromium inside the container (a TeknoirBot desktop)
 #   host     websockify only, to a socket a systemd unit makes on the host
 #
-# Multi-arch (linux/amd64, linux/arm64): only Debian packages and the noarch
-# noVNC tarball are used, nothing arch-specific is downloaded.
+# Multi-arch (linux/amd64, linux/arm64): only Debian packages and noarch
+# downloads are used (the noVNC tarball and the fonts, both checksum-pinned),
+# nothing arch-specific is downloaded.
 #
 # Two images come from this file, so a build names its target:
 #
@@ -44,6 +45,13 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # symlink made further down gives it the upstream name the scripts use. The
 # websockify console script comes in with python3-websockify, a dependency.
 #
+# librsvg2-common (400 KB; librsvg2-2 is already pulled in) is the gdk-pixbuf
+# SVG loader, and only it makes GTK able to draw an SVG: without it the panel
+# logs "Couldn't recognize the image file format" for its logo and shows a
+# missing-image icon. The grep at the end of this RUN proves the loader landed
+# in the gdk-pixbuf loader cache; if a Debian change ever drops it, the build
+# fails here instead of the panel quietly losing its logo.
+#
 # /etc/chromium.d/dev-shm is removed at the end of this RUN: Debian's
 # /usr/bin/chromium sources every file in that directory, and this one adds
 # --disable-dev-shm-usage whenever /dev/shm has less than 3.8 GB free, so the
@@ -76,6 +84,7 @@ RUN apt-get update \
       x11-xserver-utils \
       x11-xkb-utils \
       xkb-data \
+      librsvg2-common \
       fonts-dejavu-core \
       fonts-liberation2 \
       locales \
@@ -84,6 +93,7 @@ RUN apt-get update \
       -e 's/^# *sv_SE\.UTF-8 UTF-8/sv_SE.UTF-8 UTF-8/' \
       /etc/locale.gen \
  && locale-gen \
+ && grep -q 'image/svg' /usr/lib/*/gdk-pixbuf-2.0/2.10.0/loaders.cache \
  && rm -f /etc/chromium.d/dev-shm \
  && rm -rf /var/lib/apt/lists/*
 
@@ -102,6 +112,56 @@ RUN echo "${NOVNC_SHA256}  /tmp/novnc.tar.gz" | sha256sum -c - \
  && tar -xzf /tmp/novnc.tar.gz -C /opt/novnc --strip-components=1 \
  && rm -rf /opt/novnc/tests /opt/novnc/snap /opt/novnc/.github /opt/novnc/utils/*.md /opt/novnc/vnc_lite.html \
  && rm -f /tmp/novnc.tar.gz
+
+# The Teknoir fonts: Hanken Grotesk, the UI font of the platform (Backstage
+# nextgen), and JetBrains Mono, the monospace one. Both are vendored from
+# google/fonts rather than installed from Debian:
+#
+#   - Hanken Grotesk is not packaged in trixie at all (`apt-cache search
+#     hanken` finds nothing), so it has to come from upstream either way.
+#   - JetBrains Mono would come from fonts-jetbrains-mono, 7.5 MB installed
+#     for two styles this image would never show. The variable font below is
+#     187 KB and every weight is in it.
+#
+# Both files are noarch, so the same download serves amd64 and arm64, and they
+# are pinned the way the noVNC tarball is: the commit names the tree the file
+# came from (a branch or tag could move; a commit cannot), and the four
+# sha256 values name the exact bytes. They are OFL-1.1, and the licence files
+# are installed next to the fonts, in /usr/local/share/fonts/teknoir/, as the
+# licence asks.
+#
+# To bump: pick a newer commit of google/fonts, put it in
+# GOOGLE_FONTS_COMMIT, run `sha256sum` on the four files it serves, and put
+# those values in the four *_SHA256 arguments. A stale commit with fresh
+# hashes, or the reverse, fails the build at sha256sum -c.
+#
+# The RUN pipes into sha256sum -c, so it needs this stage's pipefail. fc-cache
+# is part of the desktop package set; the two fc-list greps prove the fonts
+# are not only on disk but in fontconfig's cache, under the family names
+# /etc/fonts/local.conf prefers.
+ARG GOOGLE_FONTS_COMMIT=06bfe0d62a98375cb09c942fa18e68bd32cff057
+ARG HANKEN_GROTESK_SHA256=813b3f8fa0965405669a89b38e51bbefd95eef6b8e20d1cb2d8c10cce062662f
+ARG HANKEN_GROTESK_OFL_SHA256=e02ccb89a86839b22feff7872ff5cc355cc0f58318d29eee20e2cf83a612f16d
+ARG JETBRAINS_MONO_SHA256=48715a42ec242c21e9f02692891e147d022299a52e48d5e413e1a942193ffeda
+ARG JETBRAINS_MONO_OFL_SHA256=b2fe5e8987594e9ffd1d2ca52a2f5d73eb8335243893c5d6254b5ad69269591d
+
+ADD https://raw.githubusercontent.com/google/fonts/${GOOGLE_FONTS_COMMIT}/ofl/hankengrotesk/HankenGrotesk%5Bwght%5D.ttf /tmp/fonts/HankenGrotesk-VF.ttf
+ADD https://raw.githubusercontent.com/google/fonts/${GOOGLE_FONTS_COMMIT}/ofl/hankengrotesk/OFL.txt /tmp/fonts/HankenGrotesk-OFL.txt
+ADD https://raw.githubusercontent.com/google/fonts/${GOOGLE_FONTS_COMMIT}/ofl/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf /tmp/fonts/JetBrainsMono-VF.ttf
+ADD https://raw.githubusercontent.com/google/fonts/${GOOGLE_FONTS_COMMIT}/ofl/jetbrainsmono/OFL.txt /tmp/fonts/JetBrainsMono-OFL.txt
+
+RUN printf '%s  %s\n' \
+      "$HANKEN_GROTESK_SHA256" /tmp/fonts/HankenGrotesk-VF.ttf \
+      "$HANKEN_GROTESK_OFL_SHA256" /tmp/fonts/HankenGrotesk-OFL.txt \
+      "$JETBRAINS_MONO_SHA256" /tmp/fonts/JetBrainsMono-VF.ttf \
+      "$JETBRAINS_MONO_OFL_SHA256" /tmp/fonts/JetBrainsMono-OFL.txt \
+    | sha256sum -c - \
+ && install -d -m 0755 /usr/local/share/fonts/teknoir \
+ && install -m 0644 /tmp/fonts/* /usr/local/share/fonts/teknoir/ \
+ && rm -rf /tmp/fonts \
+ && fc-cache -f /usr/local/share/fonts \
+ && fc-list | grep -qF 'HankenGrotesk-VF.ttf: Hanken Grotesk' \
+ && fc-list | grep -qF 'JetBrainsMono-VF.ttf: JetBrains Mono'
 
 COPY rootfs/ /
 

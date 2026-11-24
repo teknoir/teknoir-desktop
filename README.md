@@ -171,6 +171,106 @@ env:
   linked: the rest of `/run/desktop` (Xauthority, `vnc.sock`) stays unreachable
   from the page.
 
+## Theme
+
+The desktop wears the Teknoir look: the dark Backstage "nextgen" theme, so that
+a bot's computer and the Backstage page it is opened from read as one product.
+The colours are the dark tokens of
+`plugins/backstage-plugin-teknoir-fleet/src/theme/tokens.css` in
+[teknoir/backstage](https://github.com/teknoir/backstage):
+
+| Token | Value | Token | Value |
+|---|---|---|---|
+| bg | `#000000` | text | `#F2F1EE` |
+| surface | `#141414` | text-2 | `#C7C5BF` |
+| surface-2 | `#1C1C1C` | muted | `#8C8C8C` |
+| pop | `#171717` | accent | `#3B61BF` |
+| line | `#2A2A2A` | accent-ink | `#8CA7F2` |
+| line-2 | `#3D3D3D` | focus | `#9DB4F7` |
+| ok | `#2BC966` | warn | `#F5B02E` |
+| crit | `#FA5A5A` | on-accent | `#FFFFFF` |
+| dim-fill | `#0D0D0D` | wordmark | `#E0DED9` |
+
+The brand colours are `#E0AD1B`, `#ED6D36`, `#3B61BF` and `#9B357D`, and the
+layer colours `#C25BA6` (type), `#6F90EA` (fleet) and `#2BB8C4` (override). Two
+values are derived: accent hover `#426DD6` (accent at brightness 1.12), and the
+list selection `rgba(59,97,191,0.35)`, stronger than nextgen's 0.22 because a
+GTK row cannot carry its inset bar. The `theme-palette` test fails on any
+colour outside this set.
+
+**Dark only.** A desktop has one shared framebuffer: every viewer sees the same
+image and nothing in the image can follow one viewer's preference, so there is
+no light mode. Light could follow later by switching the token values; nothing
+in the theme's structure is dark-specific.
+
+**No compositing, no gradients, no animation.** Compositing stays off (a remote
+desktop pays for every pixel it moves), so X cannot mask a toplevel window's
+corners: menus and tooltips are square, widgets keep their 6px. Everything is a
+flat fill, `background-image: none` overrides Adwaita's gradients, and
+animations are off, because each extra frame is one more rectangle to damage,
+compress and send over the WebSocket.
+
+**GTK.** `rootfs/usr/share/themes/Teknoir/` is the theme `Teknoir`:
+
+- `index.theme` names it, with Adwaita's icons and cursor (Adwaita icons are
+  already installed as a dependency of GTK and take the theme's foreground
+  colour; they add nothing to the image).
+- `gtk-3.0/gtk.css` imports Adwaita's compiled dark theme
+  (`resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained-dark.css`, inside
+  `libgtk-3`) and then replaces every colour it paints. Plain `@define-color`
+  would do nothing: Adwaita's CSS hard-codes its hex values and never refers to
+  them, so each colour needs a selector. The `@define-color` list is still
+  there for whatever looks colours up by name, xfwm4 included.
+- A `:backdrop` block repeats the key rules. Without it, Adwaita paints a
+  window that does not have focus with its own greys (`#353535`, `#303030`):
+  an unfocused Thunar would go grey in its menubar, toolbar, sidebar and views,
+  and most windows on a watched desktop are unfocused.
+- There is no GTK2 theme. Chromium is the only GTK2 program in the image and it
+  draws its own UI; no GTK2 window is ever shown.
+
+**Settings.** Two fallbacks and one channel:
+
+- `rootfs/etc/gtk-3.0/settings.ini` and `rootfs/etc/gtk-4.0/settings.ini` are
+  what a GTK program reads itself when it starts before xfsettingsd has
+  exported the settings. GTK4 is only Chromium's dialogs.
+- `rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml` replaces
+  Debian's: the theme, Adwaita's icons and cursor (24 px), fonts and Xft values
+  in one place, so the whole session gets them. Antialiasing is greyscale
+  (`/Xft/RGBA none`): subpixel rendering triples the colours of every glyph
+  edge, and this screen is compressed and often viewed scaled down.
+
+**Fonts.** Hanken Grotesk is the UI font and JetBrains Mono the monospace one,
+in the session and in every web page Chromium shows. Both are variable fonts,
+vendored from google/fonts rather than installed from Debian: Hanken Grotesk is
+not packaged in trixie at all, and `fonts-jetbrains-mono` is 7.5 MB against
+187 KB for the one file. They are installed in
+`/usr/local/share/fonts/teknoir/` together with their OFL-1.1 licence files,
+and `rootfs/etc/fonts/local.conf` prefers them for `sans-serif`, `system-ui`
+and `monospace`. DejaVu and Liberation stay behind them for the glyphs Hanken
+Grotesk lacks and for Chromium's layout metrics.
+
+The Dockerfile pins them the way it pins noVNC: `GOOGLE_FONTS_COMMIT` names the
+google/fonts commit, and four `*_SHA256` arguments name the bytes;
+`sha256sum -c` fails the build on either drift, and `fc-list` proves they
+reached the font cache. To bump them, take a newer commit, run `sha256sum` on
+the four files, and update the five arguments together.
+
+**Logo.** `rootfs/usr/share/teknoir/teknoir-mark.svg` is the Teknoir mark: the
+four brand paths in a 20×20 box, with no clip path, so any program can draw
+it. The panel uses it as its menu button. It needs `librsvg2-common` in the
+image (the gdk-pixbuf SVG loader, 400 KB; `librsvg2-2` alone cannot read SVG),
+and the build fails if that loader ever leaves the loader cache.
+
+The window manager's theme, the panel layout, the terminal, the desktop
+backdrop and the noVNC page's own styling follow in later steps of the same
+theme.
+
+The theme is a system-wide setting, and xfsettingsd and xfconfd write user
+copies into `~/.config/` on first run. A desktop whose `/home/desktop` is a
+persistent volume therefore keeps its old theme, panel and terminal settings
+across an image update; the examples use an `emptyDir`, so a new pod gets the
+theme. Changing that means dropping the user copies in the entrypoint.
+
 ## Security model
 
 There is **no VNC password** (`-SecurityTypes None`): a password in front of an
@@ -368,8 +468,8 @@ OpenCode pin, the entrypoint, user and environment, every rule of
 `teknoir/cli` commit.
 
 The image is multi-arch (`linux/amd64`, `linux/arm64`). It is built only from
-Debian packages plus the noarch noVNC tarball (checksum-pinned), so there is no
-per-architecture download.
+Debian packages plus noarch, checksum-pinned downloads (the noVNC tarball and
+the two fonts), so there is no per-architecture download.
 
 ## Licences
 
@@ -378,4 +478,7 @@ per-architecture download.
 | noVNC 1.7.0 | MPL-2.0 |
 | TigerVNC (Xvnc) | GPL-2.0 |
 | websockify | LGPL-3.0 |
+| Hanken Grotesk | OFL-1.1 (licence in `/usr/local/share/fonts/teknoir/HankenGrotesk-OFL.txt`) |
+| JetBrains Mono | OFL-1.1 (licence in `/usr/local/share/fonts/teknoir/JetBrainsMono-OFL.txt`) |
+| Teknoir mark (`teknoir-mark.svg`) | Teknoir trademark |
 | this repository | Apache-2.0 (see `LICENSE`) |
