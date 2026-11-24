@@ -31,17 +31,23 @@
     //
     // A positioned #noVNC_container comes later in the DOM than noVNC's
     // .noVNC_center layers (the connect dialog and the credentials and
-    // verify-server dialogs), which are position:fixed with z-index auto, so
+    // verify-server layers), which are position:fixed with z-index auto, so
     // it would paint over them and a notice plus autoconnect=0 shows black
-    // where the dialog is. z-index 1 lifts those layers back above it:
-    // elementFromPoint at the dialog's centre is then the connect button
-    // again, not the container. #noVNC_fallback_error keeps its own z-index
-    // 1000, because its id selector outranks the class.
+    // where the dialog is. z-index 1 lifts the connect dialog back above it:
+    // elementFromPoint at its centre is then the connect button again, not
+    // the container. #noVNC_fallback_error keeps its own z-index 1000,
+    // because its id selector outranks the class.
+    //
+    // The :not() is what keeps the credential and verify-server dialogs
+    // visible: base.css gives their shared .noVNC_connect_layer class z-index
+    // 60, and a plain .noVNC_center rule here would tie with it, come later
+    // and win, dropping both under the connecting scrim (#noVNC_transition,
+    // 50) - a login prompt the user cannot see or reach.
     var room = document.createElement("style");
     room.textContent =
       "#noVNC_container{position:relative;top:24px;height:calc(100% - 24px)}" +
       "#noVNC_status{top:24px}" +
-      ".noVNC_center{z-index:1}";
+      ".noVNC_center:not(.noVNC_connect_layer){z-index:1}";
     document.head.appendChild(room);
 
     var bar = document.createElement("div");
@@ -49,10 +55,13 @@
     bar.setAttribute("role", "status");
     bar.title = text;
     // z-index 99: above noVNC's canvas, control bar (10), transition screen
-    // (50) and connect dialog (60), but below its status line (#noVNC_status,
-    // 100) and fatal-error box (#noVNC_fallback_error, 1000), so "Disconnected"
-    // and "Failed to connect to server" stay readable (noVNC 1.7.0
-    // app/styles/base.css).
+    // (50) and the connect dialog - which the room rule lifts to 1, above the
+    // moved container - but below its status line (#noVNC_status, 100) and
+    // fatal-error box (#noVNC_fallback_error, 1000), so "Disconnected" and
+    // "Failed to connect to server" stay readable (noVNC 1.7.0
+    // app/styles/base.css). The credential and verify-server layers keep
+    // their own 60: they are dialogs the user has to answer, not chrome, and
+    // nothing here may move them.
     //
     // The theme (README "Theme") paints it like nextgen's toast warn: a surface
     // fill with the text colour, and the warn colour only as a status edge, a

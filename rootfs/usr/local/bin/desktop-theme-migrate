@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+#
+# One-time theme migration for a desktop whose home outlives the image.
+#
+# A TeknoirBot's desktop keeps its home on a PVC (/home/desktop), and xfconfd,
+# xfsettingsd, xfwm4 and xfdesktop write a copy of the settings they are given
+# into ~/.config on first run. Those user copies win over the image's
+# /etc/xdg copies for ever after, so an existing bot keeps the values the old
+# image wrote: the old title bars, "Workspace 1"/"Workspace 2" where the image
+# names them "1"/"2", and Debian's own panel layout, while a new home gets the
+# full Teknoir theme. The same image would then look like two products
+# depending on the age of the volume.
+#
+# There is nothing to merge from the outside - the old values were written, not
+# defaulted - so this drops them once, before the session starts:
+#
+# - the theme, title, font, workspace-name and shadow properties of the xfwm4
+#   channel;
+# - the theme, icon, font, cursor, button-layout and Xft properties of the
+#   xsettings channel;
+# - the whole backdrop subtree of the xfce4-desktop channel (the image's
+#   monitorVNC-0 backdrop is keyed by the VNC connector name, which the user's
+#   file cannot have);
+# - the colour, palette, font and scrolling properties of the xfce4-terminal
+#   channel;
+# - the panel's user file and its plugin directory, so xfce4-panel runs its own
+#   migrate again from the image's /etc/xdg/xfce4/panel/default.xml;
+# - Chromium's client-side frame flag, which a profile seeded by an older image
+#   has as true.
+#
+# Everything else in those files stays, byte for byte when nothing matched: a
+# window position, a workspace count, a double-click time are the user's, not
+# the theme's. The panel and the window manager go back to the image's layout,
+# a manual window-manager or panel tweak on that desktop is lost once.
+#
+# When every step succeeded, $HOME/.config/teknoir/theme-v1 marks the home as
+# migrated and later starts skip the whole script. Delete that file and
+# restart the pod to run it again (the README says so in "Theme").
+#
+# The desktop never depends on this: the entrypoint calls it with `|| log`,
+# and on any failure (a malformed file, a read-only home) the script logs one
+# warning and leaves the marker unwritten, so the next start tries again. The
+# desktop starts either way, with whatever the user's copies say.
+set -euo pipefail
+
+PROG=desktop-theme-migrate
+
+log() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+# A failed step: say which, keep the marker away so the next start retries,
+# and exit 1. The entrypoint only logs this.
+fail() {
+  log "warning: $* (the desktop starts anyway)"
+  exit 1
+}
+
+# HOME is set by the image (ENV HOME=/home/desktop); the fallback is there so
+# the script is testable and can never write into an empty path.
+H="${HOME:-/home/desktop}"
+C="$H/.config"
+X="$C/xfce4/xfconf/xfce-perchannel-xml"
+M="$C/teknoir/theme-v1"
+
+# A migrated home costs one stat per start. Silent on purpose: a start of a
+# healthy persistent desktop logs nothing.
+if [ -e "$M" ]; then
+  exit 0
+fi
+
+# Remove the listed property paths from one xfconf user channel file. The
+# paths are xfconf's own ("/general/theme"): nested <property name=...>
+# elements under the root <channel>. An element is removed only when its whole
+# path is listed, so a group the list does not name stays even when it ends up
+# empty, and removing /backdrop takes its subtree with it (the paths inside it
+# are not listed one by one).
+#
+# The editing is in python, for the XML, and atomic: a temp file next to the
+# target and a rename, because xfconfd rewrites these files too and a reader
+# must never see half a file. A file with no match is left untouched, not
+# rewritten. The declaration stays; comments would be lost, and xfconf's user
+# files have none.
+strip_channel() {
+  local file=$1
+  shift
+  [ -f "$file" ] || return 0
+  local removed
+  removed="$(python3 -I -c '
+import os, sys, tempfile
+import xml.etree.ElementTree as ET
+
+path = sys.argv[1]
+wanted = set(sys.argv[2:])
+
+
+def die(message):
+    sys.exit(message)
+
+
+try:
+    tree = ET.parse(path)
+except (OSError, ET.ParseError) as exc:
+    die("%s: %s" % (path, exc))
+root = tree.getroot()
+
+# Every property under the root <channel>, with the element that holds it and
+# its xfconf path.
+found = []
+
+
+def walk(node, prefix):
+    for prop in node.findall("property"):
+        name = prefix + "/" + (prop.get("name") or "")
+        found.append((name, node, prop))
+        walk(prop, name)
+
+
+walk(root, "")
+removed = 0
+for name, parent, prop in found:
+    if name in wanted:
+        parent.remove(prop)
+        removed += 1
+if removed == 0:
+    # Nothing to say and nothing to write: the file stays byte-identical.
+    print(0)
+    sys.exit(0)
+
+ET.indent(tree, space="  ")
+data = ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        + ET.tostring(root, encoding="unicode") + "\n").encode("utf-8")
+
+directory = os.path.dirname(path) or "."
+try:
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".desktop-theme-migrate.")
+except OSError as exc:
+    die("%s: %s" % (path, exc))
+try:
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    # Keep the mode xfconfd gave the file (0644, whatever the umask).
+    os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+    os.replace(tmp, path)
+except OSError as exc:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    die("%s: %s" % (path, exc))
+print(removed)
+' "$file" "$@")" || fail "cannot update ${file}"
+  case "$removed" in
+    0) ;;
+    1) log "removed 1 setting from ${file##*/}" ;;
+    *) log "removed ${removed} settings from ${file##*/}" ;;
+  esac
+}
+
+strip_channel "$X/xfwm4.xml" \
+  /general/theme \
+  /general/title_font \
+  /general/title_alignment \
+  /general/button_layout \
+  /general/workspace_names \
+  /general/show_dock_shadow \
+  /general/show_frame_shadow \
+  /general/show_popup_shadow
+
+strip_channel "$X/xsettings.xml" \
+  /Net/ThemeName \
+  /Net/IconThemeName \
+  /Gtk/FontName \
+  /Gtk/MonospaceFontName \
+  /Gtk/CursorThemeName \
+  /Gtk/CursorThemeSize \
+  /Gtk/DecorationLayout \
+  /Xft/Antialias \
+  /Xft/Hinting \
+  /Xft/HintStyle \
+  /Xft/RGBA \
+  /Xft/Lcdfilter \
+  /Xft/DPI
+
+strip_channel "$X/xfce4-desktop.xml" /backdrop
+
+strip_channel "$X/xfce4-terminal.xml" \
+  /color-foreground \
+  /color-background \
+  /color-cursor \
+  /color-cursor-use-default \
+  /color-selection \
+  /color-selection-background \
+  /color-selection-use-default \
+  /color-bold-is-bright \
+  /color-palette \
+  /font-use-system \
+  /font-name \
+  /scrolling-bar \
+  /misc-menubar-default
+
+# The panel saves its layout and its plugins' own files under ~/.config/xfce4
+# and reloads them instead of running its migrate; with both gone it runs the
+# migrate again, from the image's default.xml. The directory holds only the
+# panel's own state (launchers, the clock's format), so nothing else is lost.
+panel_changed=0
+if [ -e "$X/xfce4-panel.xml" ]; then
+  rm -f -- "$X/xfce4-panel.xml" || fail "cannot remove $X/xfce4-panel.xml"
+  panel_changed=1
+fi
+if [ -e "$C/xfce4/panel" ]; then
+  rm -rf -- "$C/xfce4/panel" || fail "cannot remove $C/xfce4/panel"
+  panel_changed=1
+fi
+if ((panel_changed)); then
+  log "removed the panel configuration"
+fi
+
+# Chromium draws its own client-side frame unless the profile says otherwise
+# (README "Chromium's frame"), and an old home's profile says the opposite.
+# This runs before the session, so Chromium is not running and cannot rewrite
+# the file underneath the rename. Every other preference is kept, and a file
+# that already has the value is not rewritten.
+prefs="$C/chromium-desktop/Default/Preferences"
+if [ -f "$prefs" ]; then
+  changed="$(python3 -I -c '
+import json, os, sys, tempfile
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as fh:
+        prefs = json.load(fh)
+except (OSError, ValueError) as exc:
+    sys.exit("%s: %s" % (path, exc))
+if not isinstance(prefs, dict):
+    sys.exit("%s: not a JSON object" % path)
+browser = prefs.get("browser")
+if not isinstance(browser, dict):
+    browser = {}
+    prefs["browser"] = browser
+if browser.get("custom_chrome_frame") is False:
+    print("unchanged")
+    sys.exit(0)
+browser["custom_chrome_frame"] = False
+data = (json.dumps(prefs, indent=3, ensure_ascii=False) + "\n").encode("utf-8")
+
+directory = os.path.dirname(path) or "."
+try:
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".desktop-theme-migrate.")
+except OSError as exc:
+    sys.exit("%s: %s" % (path, exc))
+try:
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+    os.replace(tmp, path)
+except OSError as exc:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    sys.exit("%s: %s" % (path, exc))
+print("changed")
+' "$prefs")" || fail "cannot update $prefs"
+  if [ "$changed" = changed ]; then
+    log "set Chromium's system title bar"
+  fi
+fi
+
+# The marker: one line, in a directory of the theme's own (0700, nothing else
+# lives there). Written last and atomically, so a run that failed half way
+# leaves no marker and the next start repeats the whole migration, and a
+# half-written marker can never look like a finished one.
+# shellcheck disable=SC2174 # -m applies to the deepest directory, and that is
+# the one that has to be 0700: the ones -p creates above it (.config, or a new
+# home's .config) are ordinary directories.
+mkdir -m 0700 -p "$C/teknoir" || fail "cannot create $C/teknoir"
+marker_tmp="$(mktemp "$C/teknoir/.theme-v1.XXXXXX")" || fail "cannot create the theme marker"
+if ! printf '%s\n' "theme-v1: the Teknoir theme migration ran; delete this file to run it again" >"$marker_tmp"; then
+  rm -f -- "$marker_tmp"
+  fail "cannot write the theme marker"
+fi
+if ! mv -f -- "$marker_tmp" "$M"; then
+  rm -f -- "$marker_tmp"
+  fail "cannot write $M"
+fi

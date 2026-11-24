@@ -17,8 +17,11 @@
      greyscale compresses better and looks the same on any viewer's panel.
      /Gtk/DialogsUseHeader is false so a dialog keeps a title bar with a close
      button and its own window frame (visible focus) instead of a headerbar
-     that draws its own. Animations are off: every animated frame is one more
-     rectangle to damage, compress and send.
+     that draws its own. /Gtk/DecorationLayout is index.theme's ButtonLayout
+     and xfwm4's |HMC: a headerbar that draws its own title row (Thunar's, a
+     dialog's) carries the same three buttons in the same order as the window
+     frame, with no menu button. Animations are off: every animated frame is
+     one more rectangle to damage, compress and send.
 
      Keys outside the theme keep Debian's stock values; a key one of them gets
      wrong is not worth a divergence (a missing one falls back to the program's
@@ -58,7 +61,7 @@
     <property name="MenuBarAccel" type="string" value="F10"/>
     <property name="CursorThemeName" type="string" value="Adwaita"/>
     <property name="CursorThemeSize" type="int" value="24"/>
-    <property name="DecorationLayout" type="string" value="menu:minimize,maximize,close"/>
+    <property name="DecorationLayout" type="string" value=":minimize,maximize,close"/>
     <property name="DialogsUseHeader" type="bool" value="false"/>
     <property name="EnableAnimations" type="bool" value="false"/>
     <property name="TitlebarMiddleClick" type="string" value="lower"/>

@@ -35,13 +35,13 @@ fi
 ENTRYPOINT="rootfs/usr/local/bin/desktop-entrypoint"
 BROWSER="rootfs/usr/local/bin/desktop-browser"
 HEALTHCHECK="rootfs/usr/local/bin/desktop-healthcheck"
+MIGRATE="rootfs/usr/local/bin/desktop-theme-migrate"
 INDEX="rootfs/opt/novnc-extra/index.html"
 NOTICE_JS="rootfs/opt/novnc-extra/teknoir-notice.js"
 NOVNC_CSS="rootfs/opt/novnc-extra/teknoir.css"
 GTK_THEME_DIR="rootfs/usr/share/themes/Teknoir"
 GTK_CSS="$GTK_THEME_DIR/gtk-3.0/gtk.css"
 GTK3_INI="rootfs/etc/gtk-3.0/settings.ini"
-GTK4_INI="rootfs/etc/gtk-4.0/settings.ini"
 XS_SETTINGS="rootfs/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
 FONTS_CONF="rootfs/etc/fonts/local.conf"
 TEKNOIR_MARK="rootfs/usr/share/teknoir/teknoir-mark.svg"
@@ -429,15 +429,17 @@ PY
   esac
 }
 
-# The fallback settings files, xsettings.xml and the Xft values name the same
+# The fallback settings file, xsettings.xml and the Xft values name the same
 # theme, icons, cursor and fonts, so a program gets the same look whichever
-# of them answers.
+# of them answers. There is one fallback (GTK3): the image has no GTK2 and no
+# GTK4 library, because Chromium is the only program that would use them and
+# in trixie it links GTK3.
 test_gtk_settings() {
-  if python3 -I - "$GTK3_INI" "$GTK4_INI" "$XS_SETTINGS" >"$TMP/gtk-settings.out" 2>&1 <<'PY'
+  if python3 -I - "$GTK3_INI" "$XS_SETTINGS" "$GTK_THEME_DIR" >"$TMP/gtk-settings.out" 2>&1 <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 
-gtk3_ini, gtk4_ini, xsettings = sys.argv[1:]
+gtk3_ini, xsettings, theme_dir = sys.argv[1:]
 
 
 def read_ini(path):
@@ -471,8 +473,8 @@ def read_channel(path):
 
 
 g3 = read_ini(gtk3_ini)
-g4 = read_ini(gtk4_ini)
 xs = read_channel(xsettings)
+index = read_ini(theme_dir + "/index.theme")
 problems = []
 
 
@@ -490,10 +492,8 @@ want(xs, "/Gtk/CursorThemeName", "Adwaita", "xsettings")
 want(xs, "/Gtk/CursorThemeSize", "24", "xsettings")
 want(g3, "gtk-font-name", "Hanken Grotesk 10", "gtk-3.0")
 want(xs, "/Gtk/FontName", "Hanken Grotesk 10", "xsettings")
-want(g4, "gtk-font-name", "Hanken Grotesk 10", "gtk-4.0")
 want(xs, "/Gtk/MonospaceFontName", "JetBrains Mono 10", "xsettings")
 want(g3, "gtk-application-prefer-dark-theme", "true", "gtk-3.0")
-want(g4, "gtk-application-prefer-dark-theme", "true", "gtk-4.0")
 want(g3, "gtk-enable-animations", "false", "gtk-3.0")
 want(xs, "/Gtk/EnableAnimations", "false", "xsettings")
 want(g3, "gtk-xft-antialias", "1", "gtk-3.0")
@@ -508,6 +508,10 @@ want(xs, "/Xft/Lcdfilter", "lcddefault", "xsettings")
 want(xs, "/Xft/DPI", "96", "xsettings")
 want(xs, "/Gtk/DialogsUseHeader", "false", "xsettings")
 want(g3, "gtk-cursor-theme-size", "24", "gtk-3.0")
+# The decoration layout is the window buttons' order in a headerbar, so it is
+# one fact with index.theme's ButtonLayout and xfwm4's |HMC: read one, read
+# them all.
+want(xs, "/Gtk/DecorationLayout", index.get("ButtonLayout"), "xsettings")
 # Keys outside the theme keep Debian's stock values: the double-click window
 # is still 400 ms (250 splits double-clicks over VNC jitter), and a title-bar
 # middle click still lowers the window.
@@ -710,15 +714,47 @@ test_xfwm4_theme() {
   mkdir -p "$gen_out"
   cp "$XFWM4_DIR"/* "$gen_out"/
   printf 'stale\n' >"$gen_out/old-title.xpm"
+  local gen_problems=""
   if python3 -I tools/gen-xfwm4-theme.py --out "$gen_out" >"$TMP/xfwm4-out.out" 2>&1 &&
     [ ! -e "$gen_out/old-title.xpm" ] &&
     grep -qx "removed old-title.xpm" "$TMP/xfwm4-out.out" &&
     python3 -I tools/gen-xfwm4-theme.py --check "$gen_out" >>"$TMP/xfwm4-out.out" 2>&1; then
-    pass xfwm4-theme-out
+    :
   else
-    fail xfwm4-theme-out "$(tr '\n' '|' <"$TMP/xfwm4-out.out")"
+    gen_problems+="$(tr '\n' '|' <"$TMP/xfwm4-out.out"); "
   fi
   rm -rf "$gen_tmp"
+
+  # And the other half: --out owns its directory, so it must refuse one that
+  # holds somebody else's files instead of deleting them. `--out .` on the
+  # repository root once removed the Dockerfile and the Makefile, because
+  # anything outside the theme counted as stale. Exit 2, the names in the
+  # message, and every file - the stranger's and the theme's - exactly as it
+  # was.
+  gen_tmp="$(mktemp -d "${TMPDIR:-/var/tmp}/teknoir-xfwm4-foreign.XXXXXX")"
+  gen_out="$gen_tmp/theme"
+  mkdir -p "$gen_out"
+  cp "$XFWM4_DIR"/* "$gen_out"/
+  printf 'my notes\n' >"$gen_out/notes.txt"
+  printf 'stale\n' >"$gen_out/old-title.xpm"
+  cp -a "$gen_out" "$gen_tmp/before"
+  local rc
+  python3 -I tools/gen-xfwm4-theme.py --out "$gen_out" >"$TMP/xfwm4-foreign.out" 2>&1
+  rc=$?
+  if [ "$rc" = 2 ] &&
+    grep -qxF "refusing to write into $gen_out: it holds files the generator does not own: notes.txt" "$TMP/xfwm4-foreign.out" &&
+    diff -r "$gen_tmp/before" "$gen_out" >>"$TMP/xfwm4-foreign.out" 2>&1; then
+    :
+  else
+    gen_problems+="exit $rc: $(tr '\n' '|' <"$TMP/xfwm4-foreign.out"); "
+  fi
+  rm -rf "$gen_tmp"
+
+  if [ -z "$gen_problems" ]; then
+    pass xfwm4-theme-out
+  else
+    fail xfwm4-theme-out "$gen_problems"
+  fi
 
   if python3 -I - "$XFWM4_DIR" "$XFWM4_XML" >"$TMP/xfwm4-theme.out" 2>&1 <<'PY'
 import os
@@ -1316,27 +1352,119 @@ PY
 }
 
 # The pairs the desktop paints that must stay readable: WCAG AA at 4.5:1.
-# A list, so step 3 appends the banner's pairs.
+# Every pair is read from the file that paints it - the xfwm4 themerc, the
+# notice script, the noVNC stylesheet, gtk.css and the terminal channel - so
+# the test follows a colour change instead of repeating today's values: a
+# literal here would pass on main and say nothing about the image. The only
+# literals are the two selection fills, which are composited over black
+# before they are measured, because no CSS in the image holds that result.
 test_theme_contrast() {
-  if python3 -I - >"$TMP/theme-contrast.out" 2>&1 <<'PY'
+  if python3 -I - "$XFWM4_DIR/themerc" "$NOTICE_JS" "$NOVNC_CSS" "$GTK_CSS" \
+    "$TERMINAL_XML" >"$TMP/theme-contrast.out" 2>&1 <<'PY'
 import re
 import sys
+import xml.etree.ElementTree as ET
+
+THEMERC, NOTICE_JS, NOVNC_CSS, GTK_CSS, TERMINAL_XML = sys.argv[1:]
+
+problems = []
+
+
+def read_text(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def read_key_values(path, comment):
+    """themerc: `key=value` lines, `#` comments skipped."""
+    values = {}
+    for line in read_text(path).splitlines():
+        line = line.strip()
+        if not line or line.startswith(comment):
+            continue
+        key, sep, value = line.partition("=")
+        if sep:
+            values[key.strip()] = value.strip()
+    return values
+
+
+def declarations(css):
+    values = {}
+    for part in css.split(";"):
+        key, sep, value = part.partition(":")
+        if sep:
+            values[key.strip()] = value.strip()
+    return values
+
+
+def css_block(path, selectors_wanted, label):
+    """The declarations of the first rule whose selector list has an exact
+    member of selectors_wanted. Exact, because `menu menuitem` also starts
+    with `menu` and paints something else."""
+    text = read_text(path)
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", text):
+        selectors = [s.strip() for s in match.group(1).split(",")]
+        if any(wanted in selectors for wanted in selectors_wanted):
+            return declarations(match.group(2))
+    problems.append("%s: no rule for %s in %s"
+                    % (label, "/".join(sorted(selectors_wanted)), path))
+    return {}
+
+
+def js_css(name, text):
+    """One cssText assignment of teknoir-notice.js, its string literals
+    joined: the value is written as several strings split by `+`."""
+    match = re.search(r"%s\.style\.cssText\s*=(.*?);\n" % name, text, re.S)
+    if not match:
+        problems.append("%s.style.cssText is not in teknoir-notice.js" % name)
+        return {}
+    return declarations("".join(re.findall(r'"([^"]*)"', match.group(1))))
+
+
+def channel(path):
+    """A channel file's top-level properties by name."""
+    return {prop.get("name"): prop.get("value")
+            for prop in ET.parse(path).getroot().findall("property")}
+
+
+themerc = read_key_values(THEMERC, "#")
+notice = read_text(NOTICE_JS)
+bar = js_css("bar", notice)
+close = js_css("close", notice)
+connect = css_block(NOVNC_CSS, {"#noVNC_connect_button"}, "the noVNC connect button")
+suggested = css_block(GTK_CSS, {"button.suggested-action"}, "the suggested button")
+menu = css_block(GTK_CSS, {"menu", ".menu"}, "the menu")
+# gtk.css names the menu's colour itself; if a later edit leaves it to
+# inherit, the window behind the menu is what the text would show, so that is
+# where the colour then comes from.
+menu_colour = menu.get("color") or css_block(
+    GTK_CSS, {"window"}, "the window").get("color")
+terminal = channel(TERMINAL_XML)
 
 PAIRS = [
-    ("#F2F1EE", "#141414"),                # active title text on surface
-    ("#8C8C8C", "#000000"),                # inactive title text on bg
-    ("#C7C5BF", "#141414"),                # button glyph on the active fill
-    ("#FFFFFF", "#3B61BF"),                # on-accent on the accent
-    ("#FFFFFF", "#426DD6"),                # on-accent on accent hover
-    ("#F2F1EE", "#171717"),                # menu text on pop
-    ("#F2F1EE", "rgba(59,97,191,0.35)"),   # selected row over black
-    ("#F2F1EE", "rgba(59,97,191,0.22)"),   # selected sidebar row, other fill
-    # The browser side (step 3): the notice banner, its close button, the
-    # noVNC connect button and the noVNC panels.
-    ("#F2F1EE", "#141414"),                # notice banner text on surface
-    ("#C7C5BF", "#141414"),                # notice close button on surface
-    ("#FFFFFF", "#3B61BF"),                # connect button on the accent
-    ("#F2F1EE", "#171717"),                # noVNC panel text on pop
+    ("the xfwm4 title text on the active title fill",
+     themerc.get("active_text_color"), themerc.get("active_color_1")),
+    ("the xfwm4 title text on the inactive title fill",
+     themerc.get("inactive_text_color"), themerc.get("inactive_color_1")),
+    ("the xfwm4 button glyph on the active title fill",
+     themerc.get("active_text_color_2"), themerc.get("active_color_1")),
+    ("the notice banner's text on its fill",
+     bar.get("color"), bar.get("background")),
+    ("the notice banner's close button on the banner fill",
+     close.get("color"), bar.get("background")),
+    ("the noVNC connect button's text on its fill",
+     connect.get("color"), connect.get("background-color")),
+    ("the suggested button's text on its fill",
+     suggested.get("color"), suggested.get("background-color")),
+    ("the menu's text on its fill", menu_colour, menu.get("background-color")),
+    ("the terminal's foreground on its background",
+     terminal.get("color-foreground"), terminal.get("color-background")),
+    # The two selection fills: composited values, black behind the accent at
+    # .35 (a list row) and .22 (a sidebar row), under the text colour.
+    ("a selected list row's text on rgba(59,97,191,.35) over black",
+     "#F2F1EE", "rgba(59,97,191,0.35)"),
+    ("a selected sidebar row's text on rgba(59,97,191,.22) over black",
+     "#F2F1EE", "rgba(59,97,191,0.22)"),
 ]
 
 
@@ -1369,11 +1497,22 @@ def contrast(one, other):
     return (first + 0.05) / (second + 0.05)
 
 
-problems = []
-for foreground, background in PAIRS:
-    ratio = contrast(foreground, background)
+for label, foreground, background in PAIRS:
+    # A pair whose colour moved out of its file is a failure, never a skip:
+    # a silently dropped pair is how this test passed on main.
+    if not foreground or not background:
+        problems.append("%s: the pair is not in its file (%r on %r)"
+                        % (label, foreground, background))
+        continue
+    try:
+        ratio = contrast(foreground, background)
+    except ValueError as exc:
+        problems.append("%s: %s" % (label, exc))
+        continue
     if ratio < 4.5:
-        problems.append("%s on %s is %.2f:1" % (foreground, background, ratio))
+        problems.append("%s: %s on %s is %.2f:1"
+                        % (label, foreground, background, ratio))
+
 if problems:
     sys.exit("; ".join(problems))
 
@@ -1384,6 +1523,349 @@ PY
   else
     fail theme-contrast "$(tr '\n' '|' <"$TMP/theme-contrast.out")"
   fi
+}
+
+# --- the theme migration of a persistent home -------------------------------
+#
+# A TeknoirBot's home sits on a PVC and outlives the image, while the user's
+# xfconf copies win over the image's theme for ever after. The migration drops
+# the listed properties once, leaves everything else alone and marks the home;
+# the entrypoint runs it in virtual mode, before Xvnc, and only logs a failure.
+# The fixtures are xfconf's own format, `<channel>` with nested `<property>`
+# elements, so the test parses what xfconfd would write.
+test_theme_migrate() {
+  local work home xml rc problems
+  work="$(mktemp -d "${TMPDIR:-/var/tmp}/teknoir-theme-migrate.XXXXXX")"
+
+  # 1. An old image's home, with every property the theme replaces.
+  home="$work/home-old"
+  xml="$home/.config/xfce4/xfconf/xfce-perchannel-xml"
+  mkdir -p "$xml" "$home/.config/xfce4/panel/launcher-1" \
+    "$home/.config/chromium-desktop/Default"
+  cat >"$xml/xfwm4.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="Default"/>
+    <property name="title_font" type="string" value="Sans Bold 9"/>
+    <property name="button_layout" type="string" value="O|SHMC"/>
+    <property name="title_alignment" type="string" value="center"/>
+    <property name="workspace_names" type="array">
+      <value type="string" value="Workspace 1"/>
+      <value type="string" value="Workspace 2"/>
+    </property>
+    <property name="workspace_count" type="int" value="2"/>
+    <property name="focus_delay" type="int" value="250"/>
+  </property>
+</channel>
+EOF
+  cat >"$xml/xsettings.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xsettings" version="1.0">
+  <property name="Net" type="empty">
+    <property name="ThemeName" type="string" value="Xfce"/>
+    <property name="DoubleClickTime" type="int" value="400"/>
+  </property>
+</channel>
+EOF
+  cat >"$xml/xfce4-desktop.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfce4-desktop" version="1.0">
+  <property name="backdrop" type="empty">
+    <property name="single-workspace-mode" type="bool" value="true"/>
+    <property name="workspace0" type="empty">
+      <property name="image-style" type="int" value="5"/>
+      <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-teal.jpg"/>
+    </property>
+  </property>
+  <property name="desktop-icons" type="empty">
+    <property name="style" type="int" value="2"/>
+  </property>
+</channel>
+EOF
+  cat >"$xml/xfce4-terminal.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfce4-terminal" version="1.0">
+  <property name="color-background" type="string" value="#DFDBC8"/>
+  <property name="misc-confirm-close" type="bool" value="true"/>
+</channel>
+EOF
+  printf '<channel name="xfce4-panel" version="1.0"/>\n' >"$xml/xfce4-panel.xml"
+  printf '[Desktop Entry]\nName=xterm\n' \
+    >"$home/.config/xfce4/panel/launcher-1/x.desktop"
+  printf '{"browser":{"custom_chrome_frame":true,"save_session":"mine"},"profile":{"name":"mine"}}\n' \
+    >"$home/.config/chromium-desktop/Default/Preferences"
+
+  env -i PATH="$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+    >"$work/old.out" 2>"$work/old.err"
+  rc=$?
+  problems=""
+  if [ "$rc" != 0 ]; then
+    problems+="exit $rc, want 0; "
+  fi
+  if [ -s "$work/old.out" ]; then
+    problems+="the log went to stdout: $(tr '\n' '|' <"$work/old.out"); "
+  fi
+  cat >"$work/old.expected" <<'EOF'
+desktop-theme-migrate: removed 5 settings from xfwm4.xml
+desktop-theme-migrate: removed 1 setting from xsettings.xml
+desktop-theme-migrate: removed 1 setting from xfce4-desktop.xml
+desktop-theme-migrate: removed 1 setting from xfce4-terminal.xml
+desktop-theme-migrate: removed the panel configuration
+desktop-theme-migrate: set Chromium's system title bar
+EOF
+  if ! cmp -s "$work/old.expected" "$work/old.err"; then
+    problems+="stderr $(tr '\n' '|' <"$work/old.err"); "
+  fi
+  if ! python3 -I - "$home" >"$work/old-check.out" 2>&1 <<'PY'
+import json
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+home = sys.argv[1]
+xml_dir = home + "/.config/xfce4/xfconf/xfce-perchannel-xml"
+problems = []
+
+
+def paths(path):
+    """Every property path in a channel file, xfconf's own notation."""
+    found = set()
+
+    def walk(node, prefix):
+        for prop in node.findall("property"):
+            name = prefix + "/" + (prop.get("name") or "")
+            found.add(name)
+            walk(prop, name)
+
+    walk(ET.parse(path).getroot(), "")
+    return found
+
+
+def expect(label, gone, kept):
+    have = paths(xml_dir + "/" + label)
+    for name in gone:
+        if name in have:
+            problems.append("%s: %s is still there" % (label, name))
+    for name in kept:
+        if name not in have:
+            problems.append("%s: %s is gone" % (label, name))
+
+
+expect("xfwm4.xml",
+       ["/general/theme", "/general/title_font", "/general/button_layout",
+        "/general/title_alignment", "/general/workspace_names"],
+       ["/general/workspace_count", "/general/focus_delay"])
+expect("xsettings.xml", ["/Net/ThemeName"], ["/Net/DoubleClickTime"])
+expect("xfce4-desktop.xml",
+       ["/backdrop", "/backdrop/workspace0", "/backdrop/workspace0/image-style",
+        "/backdrop/workspace0/last-image"],
+       ["/desktop-icons", "/desktop-icons/style"])
+expect("xfce4-terminal.xml", ["/color-background"], ["/misc-confirm-close"])
+
+# The other copies are gone with the file: a user file nothing was left to
+# mention would still win over the image's.
+if os.path.exists(xml_dir + "/xfce4-panel.xml"):
+    problems.append("xfce4-panel.xml was not removed")
+if os.path.exists(home + "/.config/xfce4/panel"):
+    problems.append("the panel directory was not removed")
+
+with open(home + "/.config/chromium-desktop/Default/Preferences",
+          encoding="utf-8") as fh:
+    prefs = json.load(fh)
+if prefs.get("browser", {}).get("custom_chrome_frame") is not False:
+    problems.append("Chromium's custom_chrome_frame is %r"
+                    % (prefs.get("browser", {}).get("custom_chrome_frame"),))
+if prefs.get("browser", {}).get("save_session") != "mine":
+    problems.append("Chromium lost a browser preference: %r" % (prefs,))
+if prefs.get("profile") != {"name": "mine"}:
+    problems.append("Chromium lost a top-level preference: %r" % (prefs,))
+
+marker = home + "/.config/teknoir/theme-v1"
+if not os.path.isfile(marker):
+    problems.append("no theme marker")
+else:
+    with open(marker, encoding="utf-8") as fh:
+        text = fh.read()
+    if text != ("theme-v1: the Teknoir theme migration ran; delete this file "
+                "to run it again\n"):
+        problems.append("the marker's content is %r" % (text,))
+
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    problems+="$(tr '\n' '|' <"$work/old-check.out"); "
+  fi
+  if [ -z "$problems" ]; then
+    pass theme-migrate-old-home
+  else
+    fail theme-migrate-old-home "$problems"
+  fi
+
+  # 2. A marked home is skipped whatever it holds: a value written back after
+  # the migration (a user changing the theme on purpose) stays, byte for byte,
+  # and nothing is logged. Delete the marker to run it again.
+  home="$work/home-marked"
+  xml="$home/.config/xfce4/xfconf/xfce-perchannel-xml"
+  mkdir -p "$xml"
+  env -i PATH="$TEST_PATH" HOME="$home" bash "$MIGRATE" >/dev/null 2>&1
+  cat >"$xml/xfwm4.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="Default"/>
+  </property>
+</channel>
+EOF
+  cp "$xml/xfwm4.xml" "$work/marked.before"
+  env -i PATH="$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+    >"$work/marked.out" 2>"$work/marked.err"
+  rc=$?
+  if [ "$rc" = 0 ] && cmp -s "$work/marked.before" "$xml/xfwm4.xml" &&
+    [ ! -s "$work/marked.out" ] && [ ! -s "$work/marked.err" ]; then
+    pass theme-migrate-idempotent
+  else
+    fail theme-migrate-idempotent "exit $rc, stderr '$(tr '\n' '|' <"$work/marked.err")', file $(cmp "$work/marked.before" "$xml/xfwm4.xml" 2>&1)"
+  fi
+
+  # 3. A home with no .config at all: nothing to migrate, so nothing is said,
+  # and the marker is written so the next start skips the stat too.
+  home="$work/home-empty"
+  mkdir "$home"
+  env -i PATH="$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+    >"$work/empty.out" 2>"$work/empty.err"
+  rc=$?
+  if [ "$rc" = 0 ] && [ ! -s "$work/empty.err" ] && [ ! -s "$work/empty.out" ] &&
+    [ -f "$home/.config/teknoir/theme-v1" ] &&
+    [ "$(find "$home" -type f | wc -l)" = 1 ]; then
+    pass theme-migrate-new-home
+  else
+    fail theme-migrate-new-home "exit $rc, stderr '$(tr '\n' '|' <"$work/empty.err")', files: $(find "$home" -type f | tr '\n' ' ')"
+  fi
+
+  # 4. A file with none of the listed paths is not rewritten: the migration
+  # only touches what it names, so a rewrite of every user file would show up
+  # here as changed bytes (a different XML serializer, a lost format).
+  home="$work/home-untouched"
+  xml="$home/.config/xfce4/xfconf/xfce-perchannel-xml"
+  mkdir -p "$xml"
+  cat >"$xml/xfwm4.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="workspace_count" type="int" value="2"/>
+    <property name="focus_delay" type="int" value="250"/>
+  </property>
+</channel>
+EOF
+  cp "$xml/xfwm4.xml" "$work/untouched.before"
+  env -i PATH="$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+    >"$work/untouched.out" 2>"$work/untouched.err"
+  rc=$?
+  if [ "$rc" = 0 ] && cmp -s "$work/untouched.before" "$xml/xfwm4.xml" &&
+    [ ! -s "$work/untouched.err" ]; then
+    pass theme-migrate-untouched
+  else
+    fail theme-migrate-untouched "exit $rc, stderr '$(tr '\n' '|' <"$work/untouched.err")', file $(cmp "$work/untouched.before" "$xml/xfwm4.xml" 2>&1)"
+  fi
+
+  # 5. A malformed file: one warning, exit 1, and no marker, so the next start
+  # tries again. The desktop still starts (the entrypoint logs the failure).
+  home="$work/home-bad"
+  xml="$home/.config/xfce4/xfconf/xfce-perchannel-xml"
+  mkdir -p "$xml"
+  printf '<channel name="xfwm4" version="1.0"><property name="general" type="empty"><property name="theme" type="string" value="Default"/></channel>\n' \
+    >"$xml/xfwm4.xml"
+  env -i PATH="$TEST_PATH" HOME="$home" bash "$MIGRATE" \
+    >"$work/bad.out" 2>"$work/bad.err"
+  rc=$?
+  if [ "$rc" = 1 ] &&
+    grep -qF "desktop-theme-migrate: warning: cannot update $xml/xfwm4.xml (the desktop starts anyway)" \
+      "$work/bad.err" &&
+    [ ! -e "$home/.config/teknoir/theme-v1" ]; then
+    pass theme-migrate-bad-xml
+  else
+    fail theme-migrate-bad-xml "exit $rc, stderr '$(tr '\n' '|' <"$work/bad.err")', marker $(test -e "$home/.config/teknoir/theme-v1" && echo yes || echo no)"
+  fi
+
+  # 6. The entrypoint wiring, read statically: the call exists, is only logged,
+  # sits in the real run of virtual mode (after the dry run's exit 0, outside
+  # its if) and comes before Xvnc, so xfconfd cannot read the old copies first.
+  if python3 -I - "$ENTRYPOINT" >"$work/wiring.out" 2>&1 <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fh:
+    lines = fh.read().splitlines()
+
+problems = []
+calls = [i for i, line in enumerate(lines) if "desktop-theme-migrate" in line]
+if len(calls) != 1:
+    sys.exit("%d lines mention desktop-theme-migrate, want 1" % len(calls))
+call = calls[0]
+if "|| log" not in lines[call]:
+    problems.append("the call is not logged: %s" % lines[call].strip())
+
+dry = [i for i, line in enumerate(lines)
+       if line.strip() == 'if [ "$DRY_RUN" = 1 ]; then']
+if len(dry) != 1:
+    sys.exit("%d dry-run blocks, want 1" % len(dry))
+dry_exit = next((i for i in range(dry[0] + 1, len(lines))
+                 if lines[i].strip() == "exit 0"), None)
+if dry_exit is None:
+    problems.append("the dry-run block has no exit 0")
+elif call < dry_exit:
+    problems.append("the call is before the dry run's exit 0")
+
+xvnc = [i for i, line in enumerate(lines)
+        if line.strip() == 'start_child "${xvnc_cmd[@]}"']
+if len(xvnc) != 1:
+    sys.exit("%d Xvnc starts, want 1" % len(xvnc))
+if call > xvnc[0]:
+    problems.append("the call is after Xvnc starts")
+
+# Which if-blocks enclose the call: a small stack of the condition each `if`
+# opened, popped by `fi`. The call must be inside the virtual-mode branch and
+# outside the dry-run one.
+stack = []
+for index, line in enumerate(lines):
+    stripped = line.strip()
+    if index == call:
+        if "virtual" not in stack:
+            problems.append("the call is outside the virtual-mode branch")
+        if "dry" in stack:
+            problems.append("the call is inside the dry-run block")
+        break
+    if stripped.startswith("#"):
+        continue
+    if re.match(r"^if\b.*;\s*then\s*$", stripped):
+        if stripped == 'if [ "$MODE" = virtual ]; then':
+            stack.append("virtual")
+        elif stripped == 'if [ "$DRY_RUN" = 1 ]; then':
+            stack.append("dry")
+        else:
+            stack.append("other")
+    elif stripped == "fi" and stack:
+        stack.pop()
+
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    pass theme-migrate-wiring
+  else
+    fail theme-migrate-wiring "$(tr '\n' '|' <"$work/wiring.out")"
+  fi
+
+  rm -rf "$work"
 }
 
 # --- the seccomp profile ----------------------------------------------------
@@ -3345,15 +3827,8 @@ const json = (value) => () => Promise.resolve(value);
     const room = rooms[0].textContent;
     assert(room === "#noVNC_container{position:relative;top:24px;height:calc(100% - 24px)}" +
       "#noVNC_status{top:24px}" +
-      ".noVNC_center{z-index:1}",
+      ".noVNC_center:not(.noVNC_connect_layer){z-index:1}",
       "the style that makes room for the banner is '" + room + "'");
-    // The moved container comes later in the DOM than noVNC's fixed
-    // .noVNC_center layers (the connect dialog and the credentials and
-    // verify-server dialogs) and would paint over them; z-index 1 puts the
-    // dialogs back on top, or a notice with autoconnect=0 shows black.
-    assert(/\.noVNC_center\{z-index:1\}/.test(room),
-      "the room style does not lift noVNC's centred dialogs above the " +
-        "container: " + room);
     assert(/(^|;)height:24px;/.test(banner.style.cssText) &&
       /(^|;)line-height:24px(;|$)/.test(banner.style.cssText),
       "the banner is not 24px high, the room the style makes: " + banner.style.cssText);
@@ -4430,6 +4905,7 @@ test_panel_config
 test_terminal_config
 test_desktop_backdrop
 test_theme_contrast
+test_theme_migrate
 test_seccomp_profile
 test_novnc_extra
 test_novnc_theme

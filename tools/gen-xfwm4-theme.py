@@ -50,6 +50,12 @@ Usage:
     tools/gen-xfwm4-theme.py --out DIR     write every file into DIR
     tools/gen-xfwm4-theme.py --check DIR   exit 1 if DIR differs from the output
 
+`--out` owns DIR: as well as writing its 42 files it deletes a stale `*.xpm`
+(one an earlier theme left there), so a directory holding anything else - the
+repository root, a home directory - is refused with exit 2 before a single file
+is written or deleted. The only files that count as its own are `themerc`,
+`README` and the `*.xpm` theme files.
+
 The output is deterministic: same code, same bytes, in any locale, so
 `--check` is a stable CI gate.
 """
@@ -324,8 +330,30 @@ def write_tree(outdir, files):
             fh.write(content)
 
 
+def owns(name):
+    """True for a file the theme directory may hold without asking.
+
+    The generator owns its own output, and nothing else: `themerc`, `README`
+    and the `*.xpm` files. Anything else in the target means the target is
+    not a theme directory.
+    """
+    return name in ("themerc", "README") or name.endswith(".xpm")
+
+
 def cmd_out(outdir):
     files = build()
+    # Refuse a directory that holds somebody else's files before touching it.
+    # `--out .` on the repository root used to delete the Dockerfile and the
+    # Makefile, since anything not in `files` counted as a stale theme file.
+    if os.path.isdir(outdir):
+        foreign = sorted(name for name in os.listdir(outdir)
+                         if os.path.isfile(os.path.join(outdir, name))
+                         and not owns(name))
+        if foreign:
+            print("refusing to write into %s: it holds files the generator "
+                  "does not own: %s" % (outdir, ", ".join(foreign)),
+                  file=sys.stderr)
+            return 2
     write_tree(outdir, files)
     # A file this generator no longer writes (a shape dropped from the theme)
     # would stay behind and --check would report it as extra, which `make
