@@ -138,7 +138,11 @@ RUN echo "${NOVNC_SHA256}  /tmp/novnc.tar.gz" | sha256sum -c - \
 # The RUN pipes into sha256sum -c, so it needs this stage's pipefail. fc-cache
 # is part of the desktop package set; the two fc-list greps prove the fonts
 # are not only on disk but in fontconfig's cache, under the family names
-# /etc/fonts/local.conf prefers.
+# /etc/fonts/local.conf prefers. fc-list's output goes to a file that is then
+# searched, never piped into `grep -q`: grep -q exits at the first match,
+# fc-list then dies of SIGPIPE writing the rest, and pipefail turns that into
+# a failed build (exit 141) whenever the list is longer than one pipe buffer
+# write, which is what broke the first CI build on main.
 ARG GOOGLE_FONTS_COMMIT=06bfe0d62a98375cb09c942fa18e68bd32cff057
 ARG HANKEN_GROTESK_SHA256=813b3f8fa0965405669a89b38e51bbefd95eef6b8e20d1cb2d8c10cce062662f
 ARG HANKEN_GROTESK_OFL_SHA256=e02ccb89a86839b22feff7872ff5cc355cc0f58318d29eee20e2cf83a612f16d
@@ -160,8 +164,10 @@ RUN printf '%s  %s\n' \
  && install -m 0644 /tmp/fonts/* /usr/local/share/fonts/teknoir/ \
  && rm -rf /tmp/fonts \
  && fc-cache -f /usr/local/share/fonts \
- && fc-list | grep -qF 'HankenGrotesk-VF.ttf: Hanken Grotesk' \
- && fc-list | grep -qF 'JetBrainsMono-VF.ttf: JetBrains Mono'
+ && fc-list > /tmp/fc-list.txt \
+ && grep -qF 'HankenGrotesk-VF.ttf: Hanken Grotesk' /tmp/fc-list.txt \
+ && grep -qF 'JetBrainsMono-VF.ttf: JetBrains Mono' /tmp/fc-list.txt \
+ && rm -f /tmp/fc-list.txt
 
 COPY rootfs/ /
 
