@@ -43,11 +43,21 @@
     // 100) and fatal-error box (#noVNC_fallback_error, 1000), so "Disconnected"
     // and "Failed to connect to server" stay readable (noVNC 1.7.0
     // app/styles/base.css).
+    //
+    // The theme (README "Theme") paints it like nextgen's toast warn: a surface
+    // fill with the text colour, and the warn colour only as a status edge, a
+    // 3px bar down the left side plus a hairline along the bottom. Edges are
+    // box-shadows, not borders, so the 24px height stays exact (box-sizing is
+    // border-box, but a border would still have to be subtracted somewhere).
+    // A solid amber bar would shout every time the desktop is opened; nextgen
+    // keeps colour for status, and a warning shown forever on every page
+    // stops being read. Text on #141414 is 16.31:1.
     bar.style.cssText =
       "position:fixed;top:0;left:0;right:0;z-index:99;" +
       "box-sizing:border-box;display:flex;align-items:center;" +
-      "height:24px;padding:0 0.6em;background:#7a5a00;color:#ffffff;" +
-      "font-family:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;" +
+      "height:24px;padding:0 0.6em 0 12px;background:#141414;color:#F2F1EE;" +
+      "box-shadow:inset 3px 0 0 #F5B02E,inset 0 -1px 0 #2A2A2A;" +
+      "font-family:'Hanken Grotesk',system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;" +
       "font-size:13px;line-height:24px;text-align:left;cursor:default";
 
     var label = document.createElement("span");
@@ -70,11 +80,14 @@
     close.textContent = "\u00d7";
     // noVNC's input.css styles every <button> (min-width:8em, bold, a 6px
     // radius), which would make this a 128px-wide target that also takes
-    // that width from the notice text: reset those, 24x24 like the bar.
+    // that width from the notice text: reset those, 24x24 like the bar. The
+    // x is text-2 (#C7C5BF), one step below the notice's text: it is a
+    // secondary action, not part of the message, and still 10.67:1 on the
+    // bar's #141414.
     close.style.cssText =
       "flex:0 0 auto;min-width:0;width:24px;height:24px;margin:0 0 0 0.6em;" +
       "padding:0;border:0;border-radius:0;" +
-      "background:transparent;color:#ffffff;font-family:inherit;" +
+      "background:transparent;color:#C7C5BF;font-family:inherit;" +
       "font-size:16px;font-weight:normal;line-height:24px;cursor:pointer";
     close.addEventListener("click", function () {
       if (bar.parentNode) {

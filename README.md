@@ -114,9 +114,10 @@ protect by turning either direction off.
 
 A TeknoirBot's desktop (virtual mode) is shared with its whole teamspace, so
 whoever opens it must see that it is not their own computer.
-`DESKTOP_NOTICE` puts a thin amber banner at the top of the noVNC page, above
-the remote screen and noVNC's controls, and the banner is what device-controller
-passes for a TeknoirBot's computer:
+`DESKTOP_NOTICE` puts a 24 px dark banner with an amber left edge at the top of
+the noVNC page, above the remote screen and noVNC's controls (README "Theme"
+says why it is an edge and not a solid amber bar), and the banner is what
+device-controller passes for a TeknoirBot's computer:
 
 ```yaml
 env:
@@ -311,8 +312,56 @@ menu button does.
 "1" and "2" for the pager, and turns the dock, frame and popup shadows off.
 The `theme-contrast` test holds the theme's readable pairs at 4.5:1.
 
-The noVNC page's own styling and the notice banner follow in the next step of
-the same theme.
+**The noVNC page.** `rootfs/opt/novnc-extra/teknoir.css` brings the same tokens
+to the browser. The desktop side stops at the remote screen, and the page
+around it would otherwise be noVNC's own blue and grey, so a bot's computer
+and its frame still read as one product.
+
+- It remaps noVNC 1.7.0's `--novnc-*` variables in `app/styles/constants.css`,
+  which `input.css` draws almost every control from (focus outline, checkbox,
+  radio, toggle and range accents, field fills), and then overrides the
+  hard-coded colours in `base.css`: the page and the remote screen's frame, the
+  control bar and its handle, the pop-out panels and their form controls, the
+  status line, the connect dialog, the transition scrim and the logo.
+- The Dockerfile links it into `vnc.html` right after `app/styles/input.css`,
+  the last of noVNC's three stylesheets, so it wins the cascade without a single
+  `!important`. It never sets `top`, `height` or `position` on
+  `#noVNC_container` or `#noVNC_status`: the notice banner's room rule owns
+  those, and a value in the stylesheet would compete with it.
+- Hanken Grotesk is served from `app/styles/` with an `@font-face` (variable,
+  `font-weight:100 900`, `font-display:swap`), so the page needs no font from a
+  CDN and no fontconfig: the browser loads the vendored file the desktop uses.
+  Its OFL-1.1 licence is copied next to it.
+- The noVNC logo is replaced by the Teknoir mark with CSS only
+  (`font-size:0` plus the SVG as a `background-image`), in the control bar at
+  24×24 and in the connect dialog at 64×64, so `vnc.html`'s markup stays
+  stock. The same mark becomes the favicon, the `theme-color` turns black, and
+  the tab reads "Teknoir desktop" (`PAGE_TITLE` in `app/ui.js`; ui.js
+  overwrites `document.title` at runtime, so the `<title>` alone would not
+  stick).
+- Every `sed` is followed by a `grep -qF` for exactly what it wrote, and the
+  build also checks the six ids the stylesheet styles, that `vnc.html` still has
+  two `.noVNC_logo` elements, and that `noVNC_status_warn` and `--novnc-blue`
+  are still there. Each anchor is byte-exact markup in a noVNC file, so the
+  greps are what turns a noVNC bump into a failed build instead of a
+  half-applied theme.
+- The page's cache key is `v` in `rootfs/opt/novnc-extra/index.html` (now 3).
+  A bump changes the URL a browser caches the page under, so it has to move
+  together with the notice script's `?v=`, the theme stylesheet's `?v=` and the
+  Dockerfile's sed lines; `test_novnc_extra` and `test_novnc_theme` check that
+  all of them carry the same number.
+
+**Notice banner.** The banner is no longer a solid amber bar: it is a dark
+surface bar with the warn colour as a 3px left edge and a hairline along the
+bottom, nextgen's toast warn pattern, so the message is calm and the status
+colour marks it. A solid `#F5B02E` bar was rejected because a permanent amber
+bar on every page load fatigues and stops being read, and nextgen keeps colour
+for status. The text is `#F2F1EE` on `#141414` (16.31:1), the `×` is
+`#C7C5BF` (10.67:1), and both are box-shadows rather than borders, so the
+24 px height the page makes room for stays exact. The script is
+`rootfs/opt/novnc-extra/teknoir-notice.js`; `theme-palette` and
+`theme-contrast` hold its colours to the tokens, and `notice-theme` checks
+them.
 
 The theme is a system-wide setting, and xfsettingsd and xfconfd write user
 copies into `~/.config/` on first run. A desktop whose `/home/desktop` is a
@@ -529,7 +578,7 @@ the two fonts), so there is no per-architecture download.
 | noVNC 1.7.0 | MPL-2.0 |
 | TigerVNC (Xvnc) | GPL-2.0 |
 | websockify | LGPL-3.0 |
-| Hanken Grotesk | OFL-1.1 (licence in `/usr/local/share/fonts/teknoir/HankenGrotesk-OFL.txt`) |
+| Hanken Grotesk | OFL-1.1 (licence in `/usr/local/share/fonts/teknoir/HankenGrotesk-OFL.txt` and `/opt/novnc/app/styles/HankenGrotesk-OFL.txt`) |
 | JetBrains Mono | OFL-1.1 (licence in `/usr/local/share/fonts/teknoir/JetBrainsMono-OFL.txt`) |
 | Teknoir mark (`teknoir-mark.svg`) | Teknoir trademark |
 | this repository | Apache-2.0 (see `LICENSE`) |

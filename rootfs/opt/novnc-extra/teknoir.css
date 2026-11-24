@@ -1,0 +1,299 @@
+/*
+ * The Teknoir look for the noVNC page: the dark "nextgen" theme of the
+ * Teknoir platform, so that a bot's desktop in the browser and the Backstage
+ * page it is opened from read as one product.
+ *
+ * What this restyles
+ * ------------------
+ * noVNC 1.7.0 keeps its colours in two places: the --novnc-* variables in
+ * app/styles/constants.css, which input.css drives almost every form control
+ * from, and literal values in app/styles/base.css (the page, the control bar
+ * and its handle, the pop-out panels, the status line, the connect dialog,
+ * the transition screen and the logo). This file remaps the variables and
+ * overrides those selectors. It is the same split the GTK theme makes: recolour
+ * what reads a variable, then write a rule for what does not.
+ *
+ * The tokens
+ * ----------
+ * Every colour here is a dark token of Backstage nextgen, from
+ * plugins/backstage-plugin-teknoir-fleet/src/theme/tokens.css in
+ * github.com/teknoir/backstage: bg, surface, surface-2, pop, line, line-2,
+ * text, text-2, muted, accent, accent-ink, focus, ok, warn, crit, on-accent,
+ * the selection fill and the shadow. test_theme_palette fails on any other
+ * colour, so a new one has to come from there first.
+ *
+ * Load order
+ * ----------
+ * The Dockerfile links this file into vnc.html right after
+ * app/styles/input.css, so it is read after constants.css, base.css and
+ * input.css. Each rule below is either more specific than noVNC's or comes
+ * later in the cascade at the same specificity, so nothing needs !important.
+ * Keep that in mind when editing: a selector copied from base.css and then
+ * shortened can quietly lose.
+ *
+ * What it deliberately leaves alone
+ * ---------------------------------
+ * It never sets top, height or position on #noVNC_container or #noVNC_status.
+ * teknoir-notice.js owns those: its room rule moves both down by 24px while
+ * the notice banner shows and the elements go back when the banner is closed.
+ * A value here would compete with that rule, and which one won would depend on
+ * the cascade. The theme only paints the container and the status line.
+ *
+ * What a noVNC bump can break
+ * ---------------------------
+ * The --novnc-* names, the #noVNC_* ids, the .noVNC_panel / .noVNC_button /
+ * .noVNC_logo classes, the noVNC_status_* classes, the input.css controls
+ * below, and the ../images/ path. The Dockerfile checks each of them in the
+ * build, so a bump fails the build instead of silently losing the theme: the
+ * six ids in vnc.html, class="noVNC_logo" twice, noVNC_status_warn in ui.js,
+ * --novnc-blue in constants.css, the input.css link this stylesheet is
+ * inserted after, and the favicon, theme-color and title markup the other seds
+ * depend on.
+ */
+
+/* Hanken Grotesk, the platform's UI font, copied next to this file by the
+   Dockerfile together with its OFL-1.1 licence. It is a variable font, so one
+   file serves every weight; font-display:swap keeps noVNC's own UI visible at
+   once and swaps the text in when the 130 KB has arrived, instead of blocking
+   the page on a font that only the chrome uses. */
+@font-face {
+  font-family: "Hanken Grotesk";
+  src: url("HankenGrotesk-VF.ttf") format("truetype");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+/* noVNC's palette, remapped to the tokens. constants.css defines these on
+   :root, and input.css reads nearly every control colour from them: the focus
+   outline (lightblue), the checkbox, radio, toggle and range accents (blue),
+   and the field fills (buttongrey, lightgrey). Remapping them is the cheapest
+   lever there is; only the hard-coded values in base.css need rules below. */
+:root {
+  --novnc-grey: #8C8C8C;
+  --novnc-lightgrey: #3D3D3D;
+  --novnc-darkgrey: #141414;
+  --novnc-buttongrey: #1C1C1C;
+  --novnc-blue: #3B61BF;
+  --novnc-lightblue: #9DB4F7;
+  --novnc-darkblue: #141414;
+  --novnc-green: #2BC966;
+  --novnc-yellow: #F5B02E;
+  font-family: "Hanken Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* The page. base.css paints body #494949 for its grey curve; body is also what
+   shows around the remote screen when the screen is smaller than the window,
+   so it has to be the platform's background, not a lighter frame. */
+body {
+  background-color: #000000;
+  color: #F2F1EE;
+}
+
+/* The remote screen's frame. The 800x600 bottom-right curve is noVNC's
+   decorative corner; a remote desktop pays for every pixel it moves, so the
+   theme keeps the frame square, like the GTK theme keeps its popups. */
+#noVNC_container {
+  background-color: #000000;
+  border-bottom-right-radius: 0;
+}
+
+/* The control bar: a dark ribbon at the edge of the screen, rounded only on
+   the side that faces the screen. Its handle, the strip that shows and hides
+   it, gets the same fill and a hairline, and loses noVNC's picture background
+   and offset shadow (nextgen has no shadows on chrome). */
+#noVNC_control_bar {
+  background-color: #141414;
+  border: 1px solid #2A2A2A;
+  border-left: none;
+  border-radius: 0 6px 6px 0;
+}
+#noVNC_control_bar_handle {
+  background-color: #141414;
+  background-image: none;
+  box-shadow: none;
+  border: 1px solid #2A2A2A;
+}
+
+/* The bar's buttons: no border until hovered, so the icons carry the bar, and
+   a hover lifts the fill one step (surface-2). */
+#noVNC_control_bar .noVNC_button {
+  border-color: transparent;
+  border-radius: 6px;
+}
+#noVNC_control_bar .noVNC_button:hover {
+  background-color: #1C1C1C;
+}
+/* A latched button (extra keys, Ctrl, Alt, ...) wears the selection fill, the
+   same tint nextgen gives a selected row. The selector is base.css's own, id
+   and class names included: a shorter one would lose to it. */
+#noVNC_control_bar .noVNC_button.noVNC_selected {
+  background-color: rgba(59, 97, 191, .22);
+  border-color: #3D3D3D;
+}
+
+/* The pop-out panels (settings, power, clipboard, credentials): nextgen's
+   popover, the pop fill, a line-2 border and the token shadow. The browser
+   draws the shadow, not the VNC server, so it costs the remote screen
+   nothing. */
+.noVNC_panel {
+  background: #171717;
+  color: #F2F1EE;
+  border: 1px solid #3D3D3D;
+  border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .6);
+}
+.noVNC_panel hr {
+  border-top-color: #2A2A2A;
+}
+/* The heading is a strip at the top of the panel, not a blue bar: 15px
+   semibold over a hairline, the way nextgen heads a card. */
+.noVNC_panel .noVNC_heading {
+  background-color: transparent;
+  color: #F2F1EE;
+  font-size: 15px;
+  font-weight: 600;
+  border-bottom: 1px solid #2A2A2A;
+}
+
+/* The panel's form controls. input.css paints them for a light page: black
+   text on a translucent grey button, a white select with a black arrow, white
+   options. Each rule below is the selector that paints white or black in
+   input.css (1.7.0 lines 178, 317, 328, 390, 485, 522, 556, 594-595, 605),
+   scoped to .noVNC_panel so it wins on specificity, and applied in the order
+   of the controls they cover. The panel markup (vnc.html) only uses these
+   types plus text, number, password, no type, textarea and range. */
+.noVNC_panel input[type=button],
+.noVNC_panel input[type=reset],
+.noVNC_panel input[type=submit],
+.noVNC_panel button {
+  background-color: #1C1C1C;
+  color: #F2F1EE;
+}
+
+/* Text fields: surface bg, text colour, line-2 border and the 6px radius of
+   every nextgen control. The type list is input.css's own: a type added there
+   that reaches a panel needs a line here too. */
+.noVNC_panel input:not([type]),
+.noVNC_panel input[type=date],
+.noVNC_panel input[type=datetime-local],
+.noVNC_panel input[type=email],
+.noVNC_panel input[type=month],
+.noVNC_panel input[type=number],
+.noVNC_panel input[type=password],
+.noVNC_panel input[type=search],
+.noVNC_panel input[type=tel],
+.noVNC_panel input[type=text],
+.noVNC_panel input[type=time],
+.noVNC_panel input[type=url],
+.noVNC_panel input[type=week],
+.noVNC_panel textarea {
+  background-color: #141414;
+  color: #F2F1EE;
+  border: 1px solid #3D3D3D;
+  border-radius: 6px;
+}
+
+/* A select keeps its arrow: input.css defines it as --select-arrow on the
+   element, so it is still in scope here, and dropping the other two images
+   (the activation overlay and a grey gradient that works around a Firefox
+   bug) leaves only the arrow. A list select (size or multiple) has no arrow
+   and sets its own white, at a specificity above the rule above, so it needs
+   its own background and border. */
+.noVNC_panel select {
+  background-color: #141414;
+  background-image: var(--select-arrow);
+  color: #F2F1EE;
+  border: 1px solid #3D3D3D;
+  border-radius: 6px;
+}
+.noVNC_panel select[size]:not([size="1"]),
+.noVNC_panel select[multiple] {
+  background-color: #141414;
+  border: 1px solid #3D3D3D;
+}
+
+/* The options an open select shows. The text colour is set for every option,
+   and the fill only for the ones that are not checked, so that input.css's own
+   option:checked fill (its grey is line-2 after the variable remap) still
+   marks the chosen row; a background in the plain rule would come later at
+   the same specificity and paint the selected row like the rest. */
+.noVNC_panel option {
+  color: #F2F1EE;
+}
+.noVNC_panel option:not(:checked) {
+  background-color: #141414;
+}
+
+/* The status line (Connecting, Disconnected, connection errors). Only its
+   colour and hairline are set here: its position and top belong to the notice
+   banner's room rule, which moves it below the banner. Each state gets the
+   surface fill and a 3px status edge on the left, nextgen's toast pattern,
+   so the state is the colour and the text stays full contrast. */
+#noVNC_status {
+  color: #F2F1EE;
+  border-bottom: 1px solid #2A2A2A;
+}
+#noVNC_status.noVNC_status_normal {
+  background: #141414;
+  border-left: 3px solid #8CA7F2;
+}
+#noVNC_status.noVNC_status_warn {
+  background: #141414;
+  border-left: 3px solid #F5B02E;
+}
+#noVNC_status.noVNC_status_error {
+  background: #141414;
+  border-left: 3px solid #FA5A5A;
+}
+
+/* The connect dialog: a surface card over a hairline, and the connect button
+   in the accent with on-accent text. A hover brightens the accent by 12%,
+   the same #426DD6 the GTK theme derives for a hovered suggested action. */
+#noVNC_connect_dlg div {
+  background-color: #141414;
+  border: 1px solid #2A2A2A;
+  border-radius: 8px;
+  box-shadow: none;
+}
+#noVNC_connect_button {
+  background-color: #3B61BF;
+  color: #FFFFFF;
+  border-radius: 6px;
+  font-weight: 600;
+}
+#noVNC_connect_button:hover {
+  filter: brightness(1.12);
+}
+
+/* The transition screen (Connecting, Reconnecting...) is nextgen's scrim: the
+   scrim token over whatever is behind it. */
+#noVNC_transition {
+  background: rgba(0, 0, 0, .55);
+  color: #F2F1EE;
+}
+
+/* The logo: noVNC's Orbitron wordmark, replaced by the Teknoir mark. The text
+   stays in vnc.html (two .noVNC_logo elements) and font-size:0 hides it, so
+   no markup has to change; the mark is the same SVG the panel shows, copied
+   into app/images/ by the Dockerfile. Both places size it themselves, and
+   both must repeat font-size:0, because base.css sets a font-size on those
+   two id-scoped selectors that would outrank the plain class below. The
+   connect dialog's padding is dropped so the box is exactly 64x64. */
+.noVNC_logo {
+  font-size: 0;
+  text-shadow: none;
+  background: url("../images/teknoir-mark.svg") center / contain no-repeat;
+}
+#noVNC_control_bar .noVNC_logo {
+  font-size: 0;
+  width: 24px;
+  height: 24px;
+  margin: 8px auto;
+}
+#noVNC_connect_dlg .noVNC_logo {
+  font-size: 0;
+  width: 64px;
+  height: 64px;
+  padding: 0;
+  margin: 0 auto 24px;
+}

@@ -183,14 +183,53 @@ COPY rootfs/ /
 # file would mean a banner that never loads. The last grep checks that noVNC
 # still marks a connection with the noVNC_connected class, which the script
 # watches to fetch again on connect.
+#
+# The theme: teknoir.css restyles the client to the Teknoir tokens (see its
+# header), and it is linked into vnc.html right after input.css, the last of
+# noVNC's three stylesheets, so its rules come later in the cascade and need
+# no !important. The same RUN puts the brand mark and the Hanken Grotesk font
+# where the page loads them from (app/images/ and app/styles/; the font comes
+# from the RUN above, which is why that one runs first), swaps the favicon for
+# the mark, sets the browser's theme color and the page title, and patches
+# PAGE_TITLE in ui.js: ui.js overwrites document.title at runtime, so the
+# <title> sed alone would not stick and the tab would read "noVNC" again as
+# soon as the UI starts.
+#
+# Every sed here is followed by a grep for exactly what it wrote, because each
+# one anchors on byte-exact markup in a noVNC file (vnc.html, ui.js,
+# constants.css). A noVNC bump can change that markup without any checksum
+# noticing - the checksum only covers the tarball that was downloaded, and the
+# bump changes it on purpose - and without the greps the theme would silently
+# half-apply: an unstyled panel here, a "noVNC" tab there. With them the build
+# stops at the first thing that moved. The loop and the count after the seds
+# guard the markup teknoir.css depends on (the six ids it styles, and the two
+# .noVNC_logo elements it replaces with the mark), and the two greps guard the
+# class and the variable it reads.
 RUN chmod 0755 /usr/local/bin/desktop-* \
  && cp /opt/novnc-extra/index.html /opt/novnc/index.html \
  && cp /opt/novnc-extra/healthz /opt/novnc/healthz \
  && cp /opt/novnc-extra/mandatory.json /opt/novnc/mandatory.json \
  && cp /opt/novnc-extra/teknoir-notice.js /opt/novnc/teknoir-notice.js \
+ && cp /opt/novnc-extra/teknoir.css /opt/novnc/app/styles/teknoir.css \
+ && cp /usr/local/share/fonts/teknoir/HankenGrotesk-VF.ttf /usr/local/share/fonts/teknoir/HankenGrotesk-OFL.txt /opt/novnc/app/styles/ \
+ && cp /usr/share/teknoir/teknoir-mark.svg /opt/novnc/app/images/teknoir-mark.svg \
  && ln -s /run/desktop/notice.json /opt/novnc/teknoir-notice.json \
- && sed -i 's#</head>#<script src="teknoir-notice.js?v=2" defer></script></head>#' /opt/novnc/vnc.html \
- && grep -qF '<script src="teknoir-notice.js?v=2" defer></script>' /opt/novnc/vnc.html \
+ && sed -i 's#</head>#<script src="teknoir-notice.js?v=3" defer></script></head>#' /opt/novnc/vnc.html \
+ && grep -qF '<script src="teknoir-notice.js?v=3" defer></script>' /opt/novnc/vnc.html \
+ && sed -i 's#<link rel="stylesheet" href="app/styles/input.css">#&<link rel="stylesheet" href="app/styles/teknoir.css?v=3">#' /opt/novnc/vnc.html \
+ && grep -qF '<link rel="stylesheet" href="app/styles/teknoir.css?v=3">' /opt/novnc/vnc.html \
+ && sed -i 's#<link rel="icon" type="image/x-icon" href="app/images/icons/novnc.ico">#<link rel="icon" type="image/svg+xml" href="app/images/teknoir-mark.svg">#' /opt/novnc/vnc.html \
+ && grep -qF '<link rel="icon" type="image/svg+xml" href="app/images/teknoir-mark.svg">' /opt/novnc/vnc.html \
+ && sed -i 's|<meta name="theme-color" content="#313131">|<meta name="theme-color" content="#000000">|' /opt/novnc/vnc.html \
+ && grep -qF '<meta name="theme-color" content="#000000">' /opt/novnc/vnc.html \
+ && sed -i 's|<title>noVNC</title>|<title>Teknoir desktop</title>|' /opt/novnc/vnc.html \
+ && grep -qF '<title>Teknoir desktop</title>' /opt/novnc/vnc.html \
+ && sed -i 's|const PAGE_TITLE = "noVNC";|const PAGE_TITLE = "Teknoir desktop";|' /opt/novnc/app/ui.js \
+ && grep -qF 'const PAGE_TITLE = "Teknoir desktop";' /opt/novnc/app/ui.js \
+ && for id in noVNC_control_bar noVNC_control_bar_handle noVNC_status noVNC_connect_dlg noVNC_connect_button noVNC_transition; do grep -qF "id=\"$id\"" /opt/novnc/vnc.html || exit 1; done \
+ && [ "$(grep -c 'class="noVNC_logo"' /opt/novnc/vnc.html)" = 2 ] \
+ && grep -qF 'noVNC_status_warn' /opt/novnc/app/ui.js \
+ && grep -qF -- '--novnc-blue' /opt/novnc/app/styles/constants.css \
  && grep -qF 'classList.add("noVNC_connected")' /opt/novnc/app/ui.js \
  && groupadd -g 1000 desktop \
  && useradd -u 1000 -g 1000 -d /home/desktop -m -s /bin/bash desktop \

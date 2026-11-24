@@ -37,6 +37,7 @@ BROWSER="rootfs/usr/local/bin/desktop-browser"
 HEALTHCHECK="rootfs/usr/local/bin/desktop-healthcheck"
 INDEX="rootfs/opt/novnc-extra/index.html"
 NOTICE_JS="rootfs/opt/novnc-extra/teknoir-notice.js"
+NOVNC_CSS="rootfs/opt/novnc-extra/teknoir.css"
 GTK_THEME_DIR="rootfs/usr/share/themes/Teknoir"
 GTK_CSS="$GTK_THEME_DIR/gtk-3.0/gtk.css"
 GTK3_INI="rootfs/etc/gtk-3.0/settings.ini"
@@ -664,7 +665,8 @@ PY
 # (the noVNC CSS and the notice script) to this list.
 test_theme_palette() {
   local files=("$GTK_CSS" "$TEKNOIR_MARK" "$XFWM4_DIR/themerc"
-    "$PANEL_DEFAULT" "$TERMINAL_XML" "$DESKTOP_XML")
+    "$PANEL_DEFAULT" "$TERMINAL_XML" "$DESKTOP_XML" "$NOVNC_CSS" "$NOTICE_JS"
+    "$INDEX")
   local xpm
   for xpm in "$XFWM4_DIR"/*.xpm; do
     files+=("$xpm")
@@ -1246,6 +1248,12 @@ PAIRS = [
     ("#FFFFFF", "#426DD6"),                # on-accent on accent hover
     ("#F2F1EE", "#171717"),                # menu text on pop
     ("#F2F1EE", "rgba(59,97,191,0.35)"),   # selected row over black
+    # The browser side (step 3): the notice banner, its close button, the
+    # noVNC connect button and the noVNC panels.
+    ("#F2F1EE", "#141414"),                # notice banner text on surface
+    ("#C7C5BF", "#141414"),                # notice close button on surface
+    ("#FFFFFF", "#3B61BF"),                # connect button on the accent
+    ("#F2F1EE", "#171717"),                # noVNC panel text on pop
 ]
 
 
@@ -1453,6 +1461,194 @@ if data.get("path") != "websockify":
     pass dockerfile-notice
   else
     fail dockerfile-notice "$problems"
+  fi
+}
+
+# --- the noVNC theme --------------------------------------------------------
+
+# The page is styled by teknoir.css, which the Dockerfile links into vnc.html
+# after noVNC's own input.css, and the build greps for every byte-exact string
+# the seds anchor on. The CSS is read here as CSS (rules parsed, comments
+# stripped), because a grep cannot tell a declaration inside a rule from one
+# in a comment or in a neighbour's block.
+test_novnc_theme() {
+  if python3 -I - rootfs/opt/novnc-extra/teknoir.css >"$TMP/novnc-theme-css.out" 2>&1 <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="ascii") as fh:
+    text = fh.read()
+
+problems = []
+
+# Comments first: a rule quoted in the header must not count as one.
+stripped = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+if stripped.count("{") != stripped.count("}"):
+    problems.append("%d braces open, %d close" % (
+        stripped.count("{"), stripped.count("}")))
+
+# The nine --novnc-* variables constants.css defines, remapped to tokens.
+REMAPS = {
+    "--novnc-grey": "#8C8C8C",
+    "--novnc-lightgrey": "#3D3D3D",
+    "--novnc-darkgrey": "#141414",
+    "--novnc-buttongrey": "#1C1C1C",
+    "--novnc-blue": "#3B61BF",
+    "--novnc-lightblue": "#9DB4F7",
+    "--novnc-darkblue": "#141414",
+    "--novnc-green": "#2BC966",
+    "--novnc-yellow": "#F5B02E",
+}
+for name, value in REMAPS.items():
+    if not re.search(r"%s\s*:\s*%s\s*;" % (re.escape(name), re.escape(value)),
+                     stripped):
+        problems.append("%s is not remapped to %s" % (name, value))
+
+# The font the page loads from app/styles/, and the mark it draws from
+# app/images/: both are copied there by the Dockerfile.
+if not re.search(r'font-family\s*:\s*"Hanken Grotesk"\s*;\s*'
+                 r'src\s*:\s*url\("HankenGrotesk-VF\.ttf"\)', stripped):
+    problems.append('no @font-face with src:url("HankenGrotesk-VF.ttf")')
+if 'url("../images/teknoir-mark.svg")' not in stripped:
+    problems.append('no url("../images/teknoir-mark.svg")')
+
+# Rules as (selector list, body). A rule whose selector names
+# #noVNC_container or #noVNC_status may paint them but never move them: the
+# notice banner's room rule owns top, height and position, and a value here
+# would compete with it. @font-face has no selectors and is skipped.
+rule_re = re.compile(r"([^{}]+)\{([^{}]*)\}")
+for selectors, body in rule_re.findall(stripped):
+    selectors = selectors.strip()
+    if selectors.startswith("@"):
+        continue
+    if "#noVNC_container" not in selectors and "#noVNC_status" not in selectors:
+        continue
+    for declaration in body.split(";"):
+        name = declaration.split(":", 1)[0].strip().lower() if ":" in declaration else ""
+        if name in ("top", "height", "position"):
+            problems.append("%s sets %s, which the notice banner owns" % (
+                selectors, name))
+
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    pass novnc-theme-css
+  else
+    fail novnc-theme-css "$(tr '\n' '|' <"$TMP/novnc-theme-css.out")"
+  fi
+
+  # The build side: the copies, the link with the page's cache key, and a grep
+  # for each sed. The greps are checked by line order: one that ran before its
+  # sed would pass on stock markup and prove nothing, and one that is missing
+  # lets a noVNC bump break the theme silently.
+  if python3 -I - Dockerfile rootfs/opt/novnc-extra/index.html \
+    >"$TMP/dockerfile-novnc-theme.out" 2>&1 <<'PY'
+import re
+import sys
+
+dockerfile, index = sys.argv[1:]
+with open(dockerfile, encoding="utf-8") as fh:
+    text = fh.read()
+with open(index, encoding="utf-8") as fh:
+    page = fh.read()
+
+problems = []
+
+# The same cache key test_novnc_extra reads: one number for vnc.html, the
+# notice script and the theme stylesheet.
+match = re.search(r'"v":\s*"([0-9]+)"', page)
+if not match:
+    problems.append("index.html has no \"v\" default")
+    page_v = None
+else:
+    page_v = match.group(1)
+
+COPIES = [
+    "cp /opt/novnc-extra/teknoir.css /opt/novnc/app/styles/teknoir.css",
+    "cp /usr/local/share/fonts/teknoir/HankenGrotesk-VF.ttf "
+    "/usr/local/share/fonts/teknoir/HankenGrotesk-OFL.txt /opt/novnc/app/styles/",
+    "cp /usr/share/teknoir/teknoir-mark.svg "
+    "/opt/novnc/app/images/teknoir-mark.svg",
+]
+for line in COPIES:
+    if line not in text:
+        problems.append("the Dockerfile does not '%s'" % line)
+
+# Each sed and the grep that proves it wrote what it meant to. The greps are
+# searched as whole lines, and the sed's line number has to stay below the
+# grep's.
+SEDS = [
+    ("s#</head>#<script src=\"teknoir-notice.js?v=%s\" defer></script></head>#"
+     % (page_v or "?",),
+     "<script src=\"teknoir-notice.js?v=%s\" defer></script>"
+     % (page_v or "?",)),
+    ("s#<link rel=\"stylesheet\" href=\"app/styles/input.css\">"
+     "#&<link rel=\"stylesheet\" href=\"app/styles/teknoir.css?v=%s\">#"
+     % (page_v or "?",),
+     "<link rel=\"stylesheet\" href=\"app/styles/teknoir.css?v=%s\">"
+     % (page_v or "?",)),
+    ("s#<link rel=\"icon\" type=\"image/x-icon\" "
+     "href=\"app/images/icons/novnc.ico\">#"
+     "<link rel=\"icon\" type=\"image/svg+xml\" "
+     "href=\"app/images/teknoir-mark.svg\">#",
+     "<link rel=\"icon\" type=\"image/svg+xml\" "
+     "href=\"app/images/teknoir-mark.svg\">"),
+    ('s|<meta name="theme-color" content="#313131">|'
+     '<meta name="theme-color" content="#000000">|',
+     '<meta name="theme-color" content="#000000">'),
+    ('s|<title>noVNC</title>|<title>Teknoir desktop</title>|',
+     '<title>Teknoir desktop</title>'),
+    ('s|const PAGE_TITLE = "noVNC";|const PAGE_TITLE = "Teknoir desktop";|',
+     'const PAGE_TITLE = "Teknoir desktop";'),
+]
+lines = text.splitlines()
+for sed, grep_text in SEDS:
+    sed_at = [n for n, line in enumerate(lines, 1) if "sed -i '" + sed + "'" in line]
+    grep_at = [n for n, line in enumerate(lines, 1) if "grep -qF '" + grep_text + "'" in line]
+    if not sed_at:
+        problems.append("no sed for %r" % sed)
+        continue
+    if not grep_at:
+        problems.append("no grep for %r after its sed" % grep_text)
+        continue
+    if min(grep_at) <= max(sed_at):
+        problems.append("the grep for %r does not come after the sed" % grep_text)
+
+# The markup teknoir.css and the page depend on: the six ids it styles, the
+# two .noVNC_logo elements it turns into the mark, the status class it
+# recolours and the variable set it remaps.
+HOOKS = "for id in noVNC_control_bar noVNC_control_bar_handle noVNC_status " \
+        "noVNC_connect_dlg noVNC_connect_button noVNC_transition; do " \
+        'grep -qF "id=\\"$id\\"" /opt/novnc/vnc.html || exit 1; done'
+if HOOKS not in text:
+    problems.append("no build guard for the six noVNC ids teknoir.css styles")
+if "[ \"$(grep -c 'class=\"noVNC_logo\"' /opt/novnc/vnc.html)\" = 2 ]" not in text:
+    problems.append("no build guard that vnc.html has two .noVNC_logo elements")
+for needle in ("grep -qF 'noVNC_status_warn' /opt/novnc/app/ui.js",
+               "grep -qF -- '--novnc-blue' /opt/novnc/app/styles/constants.css"):
+    if needle not in text:
+        problems.append("no build guard %r" % needle)
+
+# The font RUN copies /usr/local/share/fonts/teknoir/ into the page, so it has
+# to come before this RUN.
+font_run = re.search(r"^RUN printf .*?(?=\n\n)", text, re.M | re.S)
+extra = text.find("cp /opt/novnc-extra/teknoir.css")
+if not font_run:
+    problems.append("no font install RUN")
+elif extra < 0:
+    problems.append("no noVNC theme RUN")
+elif font_run.start() > extra:
+    problems.append("the fonts are installed after the noVNC theme RUN")
+
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    pass dockerfile-novnc-theme
+  else
+    fail dockerfile-novnc-theme "$(tr '\n' '|' <"$TMP/dockerfile-novnc-theme.out")"
   fi
 }
 
@@ -2646,6 +2842,43 @@ JS
 # elements), nothing is logged, nothing leaks into the global scope, no HTML is
 # parsed and focus never moves, and any odd file means no banner at all.
 test_notice_script() {
+  # The banner's colours are the Teknoir tokens, not noVNC's own: a surface
+  # fill with the warn colour as an edge, and a muted close button. A solid
+  # amber bar was rejected (it shouts on every page load); #7a5a00 was the
+  # pre-theme fill and must not come back.
+  if python3 -I - "$NOTICE_JS" >"$TMP/notice-theme.out" 2>&1 <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    text = fh.read()
+
+
+def block(name):
+    match = re.search(r"%s\.style\.cssText\s*=(.*?);\n" % name, text, re.S)
+    return match.group(1) if match else ""
+
+
+problems = []
+bar = block("bar")
+for needle in ("background:#141414", "color:#F2F1EE",
+               "inset 3px 0 0 #F5B02E", "font-family:'Hanken Grotesk'"):
+    if needle not in bar:
+        problems.append("the banner cssText lacks %r" % needle)
+close = block("close")
+if "color:#C7C5BF" not in close:
+    problems.append("the close button cssText lacks 'color:#C7C5BF'")
+if "#7a5a00" in text:
+    problems.append("the old #7a5a00 fill is still in the script")
+if problems:
+    sys.exit("; ".join(problems))
+PY
+  then
+    pass notice-theme
+  else
+    fail notice-theme "$(tr '\n' '|' <"$TMP/notice-theme.out")"
+  fi
+
   if ! command -v node >/dev/null 2>&1; then
     skip notice-script "node is not on PATH"
     return
@@ -3930,6 +4163,7 @@ test_desktop_backdrop
 test_theme_contrast
 test_seccomp_profile
 test_novnc_extra
+test_novnc_theme
 test_dockerfile_dev_shm
 test_entrypoint_vectors
 test_notice
